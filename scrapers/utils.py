@@ -3,7 +3,6 @@
 import asyncio
 import logging
 import random
-import sys
 from typing import Callable, List, TypeVar
 
 from scrapers.base import FundingRecord
