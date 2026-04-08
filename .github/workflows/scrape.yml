@@ -35,6 +35,7 @@ jobs:
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+          HUNTER_API_KEY: ${{ secrets.HUNTER_API_KEY }}
         run: python main.py ${{ github.event.inputs.source || 'all' }}
 
       - name: Post run summary

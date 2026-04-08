@@ -31,7 +31,11 @@ SCHEMA_FIELDS = [
     "sustainability_keywords",
     "scraped_at",
     "notes",
+    "officers",  # populated by ProPublica scraper; empty for other sources
 ]
+
+OFFICERS_TAB = "Officers"
+OFFICERS_FIELDS = ["org_name", "ein", "officer_name", "title", "report_url", "scraped_at"]
 
 MASTER_TAB = "Master"
 
@@ -167,8 +171,31 @@ def _extract_existing_keys(rows: list[list]) -> set[tuple]:
     return keys
 
 
+def sync_officers_tab(spreadsheet: gspread.Spreadsheet, records: list[dict]) -> None:
+    """Write one row per officer to the Officers tab (cleared + rewritten each run)."""
+    officer_rows = []
+    for rec in records:
+        raw = rec.get("_officers_raw", [])
+        if not raw:
+            continue
+        for officer in raw:
+            officer_rows.append([
+                rec.get("company_name", ""),
+                rec.get("notes", "").split("|")[0].replace("EIN:", "").strip(),
+                officer.get("name", ""),
+                officer.get("title", ""),
+                rec.get("report_url", ""),
+                rec.get("scraped_at", ""),
+            ])
+
+    ws = _get_or_create_tab(spreadsheet, OFFICERS_TAB)
+    ws.clear()
+    ws.update([OFFICERS_FIELDS] + officer_rows)
+    print(f"[sheets] 'Officers' tab: wrote {len(officer_rows)} officer rows across {sum(1 for r in records if r.get('_officers_raw'))} orgs", file=sys.stderr)
+
+
 def sync(records: list[dict], tab_name: str) -> None:
-    """Main entry point. Overwrites source tab and appends new records to Master."""
+    """Main entry point. Overwrites source tab, appends to Master, and updates Officers tab."""
     if not records:
         print(f"[sheets] '{tab_name}': 0 records — skipping sync", file=sys.stderr)
         return
@@ -178,3 +205,21 @@ def sync(records: list[dict], tab_name: str) -> None:
 
     overwrite_tab(spreadsheet, tab_name, records)
     append_to_master(spreadsheet, records)
+
+    # Write Officers tab and trigger Hunter.io enrichment if officer data is present
+    if any(rec.get("_officers_raw") for rec in records):
+        sync_officers_tab(spreadsheet, records)
+
+        # Build flat officer list for Hunter.io enrichment
+        officer_records = []
+        for rec in records:
+            for officer in rec.get("_officers_raw", []):
+                officer_records.append({
+                    "org_name": rec.get("company_name", ""),
+                    "officer_name": officer.get("name", ""),
+                    "title": officer.get("title", ""),
+                    "report_url": rec.get("report_url", ""),
+                })
+
+        from pipeline import hunter_sync
+        hunter_sync.run(spreadsheet, officer_records)

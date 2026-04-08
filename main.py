@@ -14,7 +14,21 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).parent / ".env")
+def _load_env(env_path: Path) -> None:
+    """Load .env file, handling multi-line values like JSON blocks."""
+    if not env_path.exists():
+        return
+    with open(env_path, "r") as f:
+        content = f.read()
+    # Try standard dotenv first; fall back to manual parse for multi-line values
+    import os, re
+    pattern = re.compile(r'^([A-Z_]+)=([\s\S]*?)(?=\n[A-Z_]+=|\Z)', re.MULTILINE)
+    for match in pattern.finditer(content):
+        key, value = match.group(1), match.group(2).strip()
+        if key not in os.environ:
+            os.environ[key] = value
+
+_load_env(Path(__file__).parent / ".env")
 
 from pipeline import sheets_sync
 from scrapers import cdp, propublica

@@ -65,7 +65,7 @@ def _parse_year(val: str):
         return None
 
 
-async def _download_csv_with_retry(page, url: str, max_retries: int = 3) -> str | None:
+async def _download_csv_with_retry(page, url: str, max_retries: int = 3) -> "str | None":
     """Navigate to URL and capture CSV download, with exponential backoff retries."""
     for attempt in range(max_retries):
         try:
