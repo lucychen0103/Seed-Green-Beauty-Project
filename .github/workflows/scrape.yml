@@ -1,0 +1,66 @@
+name: ESG Funding Scraper
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'   # weekly — Monday 06:00 UTC
+  workflow_dispatch:        # allow manual runs from the Actions tab
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Playwright + Chromium system deps
+        run: |
+          playwright install chromium
+          playwright install-deps chromium
+
+      - name: Run pipeline
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+        run: python main.py
+
+      - name: Publish data.json + dashboard to gh-pages
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Fetch gh-pages if it already exists; create an orphan branch if not.
+          if git ls-remote --heads origin gh-pages | grep -q gh-pages; then
+            git fetch origin gh-pages
+            git worktree add _site origin/gh-pages
+          else
+            git worktree add _site --orphan gh-pages
+          fi
+
+          # Copy the dashboard files and fresh data.json into the worktree.
+          cp data.json          _site/data.json
+          cp dashboard/index.html _site/index.html
+          cp dashboard/app.js     _site/app.js
+          cp dashboard/styles.css _site/styles.css
+
+          cd _site
+          git add data.json index.html app.js styles.css
+
+          if git diff --cached --quiet; then
+            echo "data.json unchanged — skipping gh-pages commit"
+          else
+            git commit -m "chore: refresh dashboard data $(date -u '+%Y-%m-%d') [skip ci]"
+            git push origin gh-pages
+          fi
+
+          cd ..
+          git worktree remove _site

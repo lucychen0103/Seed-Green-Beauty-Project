@@ -1,13 +1,45 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ESG Funding Intelligence — Green Beauty Project</title>
-    <link rel="stylesheet" href="styles.css">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ESG Funding Intelligence — Green Beauty Project</title>
+  <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-    <!-- TODO: Dashboard layout -->
-    <script src="app.js"></script>
+  <header>
+    <h1>ESG Funding Intelligence</h1>
+    <p class="subtitle">Green Beauty Project — funding opportunities &amp; ESG partners</p>
+  </header>
+
+  <main>
+    <div class="controls">
+      <div class="filters" role="group" aria-label="Filter by track">
+        <button class="filter-btn active" data-track="all">All</button>
+        <button class="filter-btn" data-track="Grants &amp; Funding">Grants &amp; Funding</button>
+        <button class="filter-btn" data-track="ESG &amp; Corporate Partners">ESG &amp; Corporate Partners</button>
+      </div>
+
+      <input
+        type="search"
+        id="search"
+        placeholder="Search by name, notes, or keywords…"
+        aria-label="Search records"
+      >
+
+      <div class="export-btns">
+        <button id="export-csv">Export CSV</button>
+        <button id="export-pdf">Export PDF</button>
+      </div>
+    </div>
+
+    <div id="stats" class="stats" aria-live="polite"></div>
+
+    <div id="results" class="results" role="list" aria-live="polite">
+      <p class="loading">Loading…</p>
+    </div>
+  </main>
+
+  <script src="app.js"></script>
 </body>
 </html>

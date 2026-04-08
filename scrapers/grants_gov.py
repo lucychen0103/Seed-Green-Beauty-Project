@@ -1,7 +1,7 @@
 """Grants.gov REST API scraper — government funding opportunities.
 
 Searches open opportunities by sustainability/beauty keywords using the
-Grants.gov v2 JSON API (no auth required).
+Grants.gov legacy REST API (no auth required).
 """
 
 import asyncio
@@ -15,7 +15,7 @@ from scrapers.utils import random_delay, retry_async, tag_record
 
 logger = logging.getLogger(__name__)
 
-SEARCH_URL = "https://api.grants.gov/v2/opportunities/search"
+SEARCH_URL = "https://apply07.grants.gov/grantsws/rest/opportunities/search/"
 DETAIL_URL = "https://www.grants.gov/search-grants/opportunity/detail?oppId={}"
 PAGE_SIZE = 25
 
@@ -62,18 +62,24 @@ async def _scrape_keyword(keyword: str, seen_ids: Set[str]) -> List[FundingRecor
         }
 
         def _post(p: Dict = payload) -> Dict:
-            resp = requests.post(SEARCH_URL, json=p, timeout=30)
+            resp = requests.post(
+                SEARCH_URL,
+                json=p,
+                timeout=30,
+                headers={"Content-Type": "application/json"},
+            )
             resp.raise_for_status()
             return resp.json()
 
         data = await retry_async(lambda: asyncio.to_thread(_post))
 
-        hits: List[Dict[str, Any]] = data.get("data", {}).get("oppHits", [])
+        # Legacy API returns oppHits and hitCount at the top level
+        hits: List[Dict[str, Any]] = data.get("oppHits", [])
         if not hits:
             break
 
         for hit in hits:
-            opp_id = str(hit.get("id") or hit.get("opportunityId") or "")
+            opp_id = str(hit.get("id") or "")
             if not opp_id or opp_id in seen_ids:
                 continue
             seen_ids.add(opp_id)
@@ -81,7 +87,7 @@ async def _scrape_keyword(keyword: str, seen_ids: Set[str]) -> List[FundingRecor
             tag_record(record, f"{record.company_name} {record.notes}")
             records.append(record)
 
-        total: int = data.get("data", {}).get("hitCount", 0)
+        total: int = data.get("hitCount", 0)
         offset += PAGE_SIZE
         if offset >= total:
             break
@@ -92,21 +98,15 @@ async def _scrape_keyword(keyword: str, seen_ids: Set[str]) -> List[FundingRecor
 
 
 def _build_record(hit: Dict[str, Any], opp_id: str) -> FundingRecord:
-    synopsis = hit.get("synopsis") or {}
-    description = synopsis.get("synopsisDesc", "") if isinstance(synopsis, dict) else ""
-    closing_date = hit.get("closingDate", "")
-    if not closing_date and isinstance(synopsis, dict):
-        closing_date = synopsis.get("responseDate", "")
+    closing_date = hit.get("closeDate", "")
 
     return FundingRecord(
         company_name=hit.get("title", ""),
         source="grants_gov",
         source_track="Grants & Funding",
-        sector=hit.get("agencyName", ""),
+        sector=hit.get("agency", ""),
         report_url=DETAIL_URL.format(opp_id),
         funding_type="government",
-        # opportunityId prefix is the stable upsert key used by pipeline/airtable_sync.py
-        notes=f"opportunityId:{opp_id} | closingDate:{closing_date} | {description}".strip(
-            " |"
-        ),
+        # opportunityId prefix is the stable upsert key used by pipeline/sheets_sync.py
+        notes=f"opportunityId:{opp_id} | closeDate:{closing_date}".strip(" |"),
     )
