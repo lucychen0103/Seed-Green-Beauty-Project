@@ -111,18 +111,37 @@ def _find_email(first_name: str, last_name: str, company: str, api_key: str) -> 
     return {"email": "", "confidence": "", "status": "error"}
 
 
+EMAIL_LOOKUP_LIMIT = 10  # Max Hunter.io lookups per run to preserve API credits
+
+
 def enrich_officers(officer_records: list[dict], api_key: str) -> list[dict]:
     """
     Filter officers by sustainability title, look up emails via Hunter.io.
+    Falls back to all officers if none match sustainability keywords.
+    Caps lookups at EMAIL_LOOKUP_LIMIT to preserve Hunter.io API credits.
     Returns list of contact dicts ready for the Contacts tab.
     """
     contacts = []
     eligible = [r for r in officer_records if _is_sustainability_title(r.get("title", ""))]
 
-    print(
-        f"[hunter] {len(eligible)} sustainability-relevant officers out of {len(officer_records)} total",
-        file=sys.stderr,
-    )
+    if eligible:
+        print(
+            f"[hunter] {len(eligible)} sustainability-relevant officers out of {len(officer_records)} total",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"[hunter] No sustainability-relevant titles found — falling back to all {len(officer_records)} officers",
+            file=sys.stderr,
+        )
+        eligible = officer_records
+
+    if len(eligible) > EMAIL_LOOKUP_LIMIT:
+        print(
+            f"[hunter] Capping lookups at {EMAIL_LOOKUP_LIMIT} (had {len(eligible)}) to preserve API credits",
+            file=sys.stderr,
+        )
+        eligible = eligible[:EMAIL_LOOKUP_LIMIT]
 
     for i, record in enumerate(eligible):
         first, last = _split_name(record.get("officer_name", ""))
