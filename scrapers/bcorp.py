@@ -2,6 +2,12 @@
 
 Scrapes certified B Corp companies in the Personal Care & Beauty sector
 from bcorporation.net/en-us/find-a-b-corp/.
+
+The site is a Next.js/React app. Confirmed data-testid attributes (2026-04):
+  search-input      — the text input inside the search box
+  search-button     — submit button
+  profile-link      — one per company result (anchor element)
+  company-name-desktop — company name text, child of profile-link
 """
 
 import logging
@@ -38,9 +44,10 @@ async def scrape(headless: bool = True) -> List[FundingRecord]:
             await browser.close()
             return records
 
+        seen_urls: set = set()
         for industry in INDUSTRIES:
             try:
-                industry_records = await _scrape_industry(context, industry)
+                industry_records = await _scrape_industry(context, industry, seen_urls)
                 records.extend(industry_records)
             except Exception as exc:
                 logger.error(
@@ -68,70 +75,69 @@ async def _robots_allows(context: BrowserContext) -> bool:
         return True
 
 
-async def _scrape_industry(context: BrowserContext, industry: str) -> List[FundingRecord]:
+async def _scrape_industry(
+    context: BrowserContext, industry: str, seen_urls: set
+) -> List[FundingRecord]:
     records: List[FundingRecord] = []
     page = await context.new_page()
 
     await retry_async(
-        lambda: page.goto(DIRECTORY_URL, wait_until="networkidle", timeout=30_000)
+        lambda: page.goto(DIRECTORY_URL, wait_until="networkidle", timeout=60_000)
     )
+    await page.wait_for_timeout(3_000)
 
-    # Apply industry filter if a filter input is present
+    # Submit the industry name as the search query
     try:
-        await page.fill(
-            'input[placeholder*="industry" i], input[aria-label*="industry" i]',
-            industry,
-        )
-        await page.keyboard.press("Enter")
-        await page.wait_for_load_state("networkidle")
-    except Exception:
-        logger.warning(
-            "bcorp: could not apply industry filter for %r — scraping unfiltered",
-            industry,
-        )
+        search_input = await page.query_selector('[data-testid="search-input"]')
+        if search_input:
+            await search_input.fill(industry)
+            await search_input.press("Enter")
+            await page.wait_for_load_state("networkidle")
+            await page.wait_for_timeout(3_000)
+        else:
+            logger.warning("bcorp: search-input not found for %r", industry)
+    except Exception as exc:
+        logger.warning("bcorp: search submission failed for %r: %s", industry, exc)
 
-    # Paginate through result cards
-    while True:
-        await page.wait_for_timeout(1_500)
-        cards = await page.query_selector_all(
-            ".company-card, .directory-result, article[class*='company'], li[class*='result']"
-        )
+    # Scroll to trigger lazy-loading of results
+    await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+    await page.wait_for_timeout(2_000)
 
-        for card in cards:
-            record = await _parse_card(card, industry)
-            if record:
-                tag_record(record, f"{record.company_name} {record.sector} {record.notes}")
-                records.append(record)
+    # Collect all profile-link elements — one per company result
+    card_els = await page.query_selector_all('[data-testid="profile-link"]')
+    logger.info("bcorp: %d results for %r (url=%s)", len(card_els), industry, page.url)
 
-        next_btn = await page.query_selector(
-            "a[aria-label='Next page'], button[aria-label='Next'], "
-            ".pagination__next:not([disabled])"
-        )
-        if not next_btn:
-            break
-
-        await next_btn.click()
-        await page.wait_for_load_state("networkidle")
-        await random_delay()
+    for card in card_els:
+        record = await _parse_card(card, industry)
+        if record and record.report_url not in seen_urls:
+            seen_urls.add(record.report_url)
+            tag_record(record, f"{record.company_name} {record.sector} {record.notes}")
+            records.append(record)
 
     await page.close()
     return records
 
 
 async def _parse_card(card, industry: str) -> Optional[FundingRecord]:
+    """Parse a [data-testid="profile-link"] anchor element into a FundingRecord."""
     try:
-        name_el = await card.query_selector("h2, h3, .company-name, [class*='name']")
-        link_el = await card.query_selector("a")
-        score_el = await card.query_selector(".score, .b-impact-score, [class*='score']")
-        sector_el = await card.query_selector(".industry, .sector, [class*='industry']")
-
+        # Company name
+        name_el = await card.query_selector('[data-testid="company-name-desktop"]')
         name = (await name_el.inner_text()).strip() if name_el else ""
+        if not name:
+            # Fallback: any heading or the link text itself
+            name = (await card.inner_text()).strip().splitlines()[0]
         if not name:
             return None
 
-        href = await link_el.get_attribute("href") if link_el else ""
+        # Profile URL — the card itself is the anchor
+        href = await card.get_attribute("href") or ""
         if href and not href.startswith("http"):
             href = "https://www.bcorporation.net" + href
+
+        # Optional: score / sector within card
+        score_el = await card.query_selector('[class*="score"], [data-testid*="score"]')
+        sector_el = await card.query_selector('[data-testid*="industry"], [data-testid*="sector"]')
 
         score = (await score_el.inner_text()).strip() if score_el else ""
         sector = (await sector_el.inner_text()).strip() if sector_el else industry

@@ -135,7 +135,7 @@ def _load_existing(
     worksheet: gspread.Worksheet,
 ) -> Tuple[List[List[str]], Dict[str, int]]:
     """Return all data rows and a column-name → 0-based-index mapping."""
-    all_values = worksheet.get_all_values()
+    all_values = worksheet.get_all_values(value_render_option="FORMULA")
     if not all_values:
         return [], {}
 
@@ -204,10 +204,10 @@ def _upsert_source(
             existing_rows.append(row_values)
 
     if cells_to_update:
-        worksheet.update_cells(cells_to_update)
+        worksheet.update_cells(cells_to_update, value_input_option="USER_ENTERED")
 
     if rows_to_append:
-        worksheet.append_rows(rows_to_append)
+        worksheet.append_rows(rows_to_append, value_input_option="USER_ENTERED")
 
 
 def _find_match(
@@ -266,7 +266,7 @@ def _to_row(record: FundingRecord) -> List[Any]:
         record.score_or_rating,
         record.sector,
         record.year_of_disclosure if record.year_of_disclosure is not None else "",
-        record.report_url,
+        f'=HYPERLINK("{record.report_url}","View record")' if record.report_url else "",
         opp_id,
         record.funding_type,
         record.beauty_alignment,
