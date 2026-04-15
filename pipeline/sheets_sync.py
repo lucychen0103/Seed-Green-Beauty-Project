@@ -266,7 +266,7 @@ def _to_row(record: FundingRecord) -> List[Any]:
         record.score_or_rating,
         record.sector,
         record.year_of_disclosure if record.year_of_disclosure is not None else "",
-        f'=HYPERLINK("{record.report_url}","View record")' if record.report_url else "",
+        record.report_url or "",
         opp_id,
         record.funding_type,
         record.beauty_alignment,
