@@ -66,7 +66,8 @@ def _open_spreadsheet(client: gspread.Client) -> gspread.Spreadsheet:
             "SPREADSHEET_ID is not set. "
             "Add the Google Sheets spreadsheet ID to your .env file or GitHub Secrets."
         )
-    return client.open_by_key(spreadsheet_id)
+    url = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit"
+    return client.open_by_url(url)
 
 
 def _records_to_rows(records: list[dict]) -> list[list]:
