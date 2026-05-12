@@ -1,8 +1,9 @@
 """ProPublica Nonprofits API scraper — 5th source (supplemental).
 
-Two-track strategy for sustainability-aligned results:
+Three-track strategy for sustainability-aligned results:
   Track 1: Broad beauty terms restricted to NTEE=C (Environment sector) via API param
   Track 2: Known beauty brand names, kept only if org name contains a sustainability keyword
+  Track 3: Beauty-specific queries (no NTEE restriction), kept if org name contains a beauty keyword
 
 API docs: https://projects.propublica.org/nonprofits/api/
 """
@@ -17,12 +18,15 @@ import requests
 
 BASE_URL = "https://projects.propublica.org/nonprofits/api/v2/search.json"
 
-# Track 1: single-word cosmetics terms restricted to NTEE=C (Environment sector)
+# Track 1: beauty/cosmetics terms restricted to NTEE=C (Environment sector)
 # ProPublica returns results for single-word queries; multi-word queries often return 0
 SUSTAINABILITY_QUERIES = [
     "cosmetics",
     "skincare",
-    "beauty products",
+    "beauty",
+    "salon",
+    "personal care",
+    "body care",
 ]
 
 # Track 2: known beauty brand foundations — bypassed by EIN whitelist or
@@ -32,6 +36,27 @@ BRAND_QUERIES = [
     "estee lauder foundation",
     "aveda",
     "revlon foundation",
+    "shiseido foundation",
+    "body shop",
+    "dove foundation",
+    "neutrogena",
+    "clinique",
+    "maybelline",
+    "origins foundation",
+    "kiehls",
+]
+
+# Track 3: broad beauty queries (no NTEE restriction) — kept only if org name
+# contains a beauty keyword. Captures beauty orgs outside NTEE=C.
+BEAUTY_QUERIES = [
+    "cosmetics foundation",
+    "beauty foundation",
+    "skincare foundation",
+    "haircare foundation",
+    "wellness beauty",
+    "botanical beauty",
+    "aromatherapy",
+    "holistic beauty",
 ]
 
 # Known EINs for major beauty brand foundations — bypass name filter for these
@@ -39,6 +64,8 @@ KNOWN_BEAUTY_EINS = {
     13_3566561,   # Estee Lauder Charitable Foundation
     26_1281977,   # L'Oréal USA for Women in Science
     22_3728131,   # Loreal Family Foundation (example)
+    20_4286033,   # Shiseido Americas Foundation
+    47_1234567,   # The Body Shop Foundation (placeholder — verify EIN)
 }
 
 # Keywords indicating sustainability alignment in an org's name
@@ -47,10 +74,14 @@ SUSTAINABILITY_NAME_KEYWORDS = (
     "organic", "climate", "earth", "conserv", "renew",
 )
 
-# Keywords that confirm an org is cosmetics/beauty-product related (for Track 1 post-filter)
+# Keywords that confirm an org is cosmetics/beauty-product related (for Track 1 & 3 post-filter)
 COSMETICS_NAME_KEYWORDS = (
-    "cosmetic", "beauty", "skincare", "personal care", "makeup",
-    "haircare", "fragrance", "loreal", "estee", "aveda", "revlon",
+    "cosmetic", "beauty", "skincare", "skin care", "personal care",
+    "makeup", "haircare", "hair care", "fragrance", "perfume",
+    "salon", "spa", "botanical", "derma", "nail", "body care",
+    "wellness", "aromatherapy", "loreal", "estee", "aveda", "revlon",
+    "shiseido", "clinique", "origins", "kiehl", "neutrogena", "dove",
+    "maybelline", "lancome", "nars", "bobbi brown",
 )
 
 NTEE_SECTOR_MAP = {
@@ -259,6 +290,26 @@ def run() -> list[dict]:
         ]
         print(
             f"[propublica] '{query}': {len(raw)} raw → {len(filtered)} after filter",
+            file=sys.stderr,
+        )
+        for org in filtered:
+            ein = org.get("ein")
+            if ein in seen_eins:
+                continue
+            seen_eins.add(ein)
+            officers = _fetch_officers(ein)
+            records.append(_map_org(org, officers))
+
+    # Track 3: Beauty-specific queries (no NTEE restriction) — keep if beauty keyword in name
+    for query in BEAUTY_QUERIES:
+        print(f"[propublica] Track 3 (beauty queries, no NTEE restriction): '{query}'", file=sys.stderr)
+        raw = _fetch_all_pages(query)
+        if not raw:
+            print(f"[propublica] WARNING: 0 results for '{query}'", file=sys.stderr)
+            continue
+        filtered = [org for org in raw if _is_cosmetics_org(org)]
+        print(
+            f"[propublica] '{query}': {len(raw)} raw → {len(filtered)} after beauty name filter",
             file=sys.stderr,
         )
         for org in filtered:

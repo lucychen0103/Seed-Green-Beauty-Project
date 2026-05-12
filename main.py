@@ -54,7 +54,7 @@ async def run_all(source: str = "all") -> None:
         try:
             records = propublica.run()
             if records:
-                sheets_sync.sync(records, "ProPublica")
+                sheets_sync.sync(records, "ProPublica", merge=True)
                 summary["ProPublica"] = f"{len(records)} records synced"
             else:
                 summary["ProPublica"] = "0 records — sync skipped"
@@ -67,10 +67,31 @@ async def run_all(source: str = "all") -> None:
         print(f"  {src}: {status}")
 
 
+def write_scoring_guide() -> None:
+    """Connect to the spreadsheet and (re)write the Scoring Guide tab only."""
+    client = sheets_sync.get_client()
+    spreadsheet = sheets_sync._open_spreadsheet(client)
+    sheets_sync._write_scoring_guide_tab(spreadsheet)
+    print("Scoring Guide tab updated.")
+
+
+def enrich_top_performers() -> None:
+    """Find top 5 companies per source and look up employee emails via Hunter.io."""
+    from pipeline import top_performers
+    client = sheets_sync.get_client()
+    spreadsheet = sheets_sync._open_spreadsheet(client)
+    top_performers.run(spreadsheet)
+
+
 if __name__ == "__main__":
     source = sys.argv[1] if len(sys.argv) > 1 else "all"
-    valid_sources = {"all", "cdp", "propublica"}
+    valid_sources = {"all", "cdp", "propublica", "scoring-guide", "enrich-top5"}
     if source not in valid_sources:
         print(f"Unknown source '{source}'. Valid options: {', '.join(sorted(valid_sources))}", file=sys.stderr)
         sys.exit(1)
-    asyncio.run(run_all(source))
+    if source == "scoring-guide":
+        write_scoring_guide()
+    elif source == "enrich-top5":
+        enrich_top_performers()
+    else:
+        asyncio.run(run_all(source))
