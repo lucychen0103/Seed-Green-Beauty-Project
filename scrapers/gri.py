@@ -1,6 +1,6 @@
 """GRI Sustainability Disclosure Database Playwright scraper — ESG & Corporate Partners.
 
-Scrapes companies in consumer goods / personal care sectors that have published
+Scrapes companies in sustainability / ESG / CSR sectors that have published
 GRI-based sustainability reports, from database.globalreporting.org.
 No login required. Upsert key: report_url.
 """
@@ -24,16 +24,22 @@ USER_AGENT = (
     "Chrome/124.0.0.0 Safari/537.36"
 )
 
-# Sector filter values as they appear in the GRI database search UI.
-# Adjust if the site uses different labels on first run.
-TARGET_SECTORS = [
-    "Consumer Goods",
-    "Personal Care",
+SEARCH_KEYWORDS = [
+    "Sustainability",
+    "ESG",
+    "CSR",
+    "Social Responsibility",
+    "Corporate Social Responsibility",
+    "Environmental",
+    "Climate",
+    "Green",
+    "Impact",
+    "Ethical",
 ]
 
 
 async def scrape(headless: bool = True) -> List[FundingRecord]:
-    """Return GRI-reporting companies in consumer goods / personal care sectors."""
+    """Return GRI-reporting companies matching ESG/sustainability keywords."""
     records: List[FundingRecord] = []
 
     async with async_playwright() as p:
@@ -45,13 +51,14 @@ async def scrape(headless: bool = True) -> List[FundingRecord]:
             await browser.close()
             return records
 
-        for sector in TARGET_SECTORS:
+        seen_urls: set = set()
+        for keyword in SEARCH_KEYWORDS:
             try:
-                sector_records = await _scrape_sector(context, sector)
-                records.extend(sector_records)
+                kw_records = await _scrape_keyword(context, keyword, seen_urls)
+                records.extend(kw_records)
             except Exception as exc:
                 logger.error(
-                    "gri: sector %r failed: %s", sector, exc, exc_info=True
+                    "gri: keyword %r failed: %s", keyword, exc, exc_info=True
                 )
             await random_delay()
 
@@ -74,37 +81,56 @@ async def _robots_allows(context: BrowserContext) -> bool:
         return True
 
 
-async def _scrape_sector(context: BrowserContext, sector: str) -> List[FundingRecord]:
+async def _scrape_keyword(
+    context: BrowserContext, keyword: str, seen_urls: set
+) -> List[FundingRecord]:
     records: List[FundingRecord] = []
     page = await context.new_page()
 
     await retry_async(
         lambda: page.goto(SEARCH_URL, wait_until="networkidle", timeout=30_000)
     )
+    await page.wait_for_timeout(2_000)
 
-    # Apply sector filter via the search UI
-    await _apply_sector_filter(page, sector)
+    await _run_keyword_search(page, keyword)
+
+    # Wait for results to appear
+    try:
+        await page.wait_for_selector(
+            "table tbody tr, [class*='result'], [role='row'], li[class*='result']",
+            timeout=10_000,
+        )
+    except Exception:
+        logger.warning("gri: no results selector appeared for keyword %r", keyword)
+        await _save_debug_snapshot(page, keyword)
+        await page.close()
+        return records
 
     # Paginate through results
     while True:
-        await page.wait_for_timeout(1_500)
+        await page.wait_for_timeout(1_000)
         rows = await page.query_selector_all(
-            "table tbody tr, .search-result, .report-row, [class*='result-item']"
+            "table tbody tr, .search-result, .report-row, "
+            "[class*='result-item'], [role='row'], li[class*='result']"
         )
 
         if not rows:
-            logger.warning("gri: no result rows found for sector %r", sector)
+            logger.warning("gri: no result rows found for keyword %r", keyword)
+            await _save_debug_snapshot(page, keyword)
             break
 
+        logger.info("gri: %d rows for keyword %r", len(rows), keyword)
+
         for row in rows:
-            record = await _parse_row(row, sector)
-            if record:
+            record = await _parse_row(row, keyword)
+            if record and record.report_url not in seen_urls:
+                seen_urls.add(record.report_url)
                 tag_record(record, f"{record.company_name} {record.sector} {record.notes}")
                 records.append(record)
 
         next_btn = await page.query_selector(
-            "a[aria-label='Next page'], button[aria-label='Next'], "
-            ".pagination__next:not([disabled]), [class*='next']:not([disabled])"
+            "button:has-text('Next'), a:has-text('Next'), "
+            "[aria-label*='next' i]:not([disabled])"
         )
         if not next_btn:
             break
@@ -117,38 +143,46 @@ async def _scrape_sector(context: BrowserContext, sector: str) -> List[FundingRe
     return records
 
 
-async def _apply_sector_filter(page: Page, sector: str) -> None:
-    """Attempt to filter results by sector using the search UI."""
+async def _run_keyword_search(page: Page, keyword: str) -> None:
+    """Submit keyword as a text search query."""
     try:
-        # Try a select dropdown first
-        sector_select = await page.query_selector(
-            "select[name*='sector' i], select[id*='sector' i], select[aria-label*='sector' i]"
+        search_input = await page.query_selector(
+            "input[type='search'], input[placeholder*='search' i], "
+            "input[placeholder*='organization' i], input[placeholder*='company' i], "
+            "[role='searchbox'], input[name*='search' i], input[id*='search' i]"
         )
-        if sector_select:
-            await sector_select.select_option(label=sector)
+        if search_input:
+            await search_input.fill(keyword)
+            await search_input.press("Enter")
             await page.wait_for_load_state("networkidle")
             return
 
-        # Fall back to a text input filter
-        sector_input = await page.query_selector(
-            "input[placeholder*='sector' i], input[aria-label*='sector' i]"
-        )
-        if sector_input:
-            await sector_input.fill(sector)
-            await page.keyboard.press("Enter")
-            await page.wait_for_load_state("networkidle")
-            return
-
-        logger.warning("gri: no sector filter control found for %r — scraping unfiltered", sector)
+        # Fall back to appending query param
+        url = f"{SEARCH_URL}?q={keyword.replace(' ', '+')}"
+        await page.goto(url, wait_until="networkidle", timeout=30_000)
+        logger.info("gri: no search input found for %r — navigated to %s", keyword, url)
     except Exception as exc:
-        logger.warning("gri: could not apply sector filter for %r: %s", sector, exc)
+        logger.warning("gri: keyword search failed for %r: %s", keyword, exc)
 
 
-async def _parse_row(row, sector: str) -> Optional[FundingRecord]:
+async def _save_debug_snapshot(page: Page, keyword: str) -> None:
+    """Save screenshot and HTML for offline selector inspection."""
     try:
-        # GRI database rows typically contain: org name, country, sector, year, report link
+        safe = keyword.replace(" ", "_").lower()
+        await page.screenshot(path=f"debug_gri_{safe}.png", full_page=True)
+        html = await page.content()
+        with open(f"debug_gri_{safe}.html", "w", encoding="utf-8") as f:
+            f.write(html)
+        logger.info("gri: debug snapshot saved for keyword %r", keyword)
+    except Exception as exc:
+        logger.warning("gri: could not save debug snapshot: %s", exc)
+
+
+async def _parse_row(row, keyword: str) -> Optional[FundingRecord]:
+    try:
         name_el = await row.query_selector(
-            "td:first-child, .org-name, [class*='organisation'], [class*='company']"
+            "td:first-child, .org-name, [class*='organisation'], [class*='company'], "
+            "[class*='organization'], [class*='name']"
         )
         link_el = await row.query_selector("a[href]")
         year_el = await row.query_selector(
@@ -178,12 +212,12 @@ async def _parse_row(row, sector: str) -> Optional[FundingRecord]:
             source="gri",
             source_track="ESG & Corporate Partners",
             disclosure_status=True,
-            sector=f"{sector} — {country}".strip(" —"),
+            sector=f"{keyword} — {country}".strip(" —"),
             year_of_disclosure=year,
             report_url=href,
             funding_type="corporate_sponsor",
             is_open=None,
-            notes=f"GRI sustainability report | year:{year_text} | country:{country}",
+            notes=f"GRI sustainability report | keyword:{keyword} | year:{year_text} | country:{country}",
         )
     except Exception as exc:
         logger.warning("gri: failed to parse row: %s", exc)

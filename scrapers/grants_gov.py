@@ -6,6 +6,7 @@ Grants.gov legacy REST API (no auth required).
 
 import asyncio
 import logging
+import re
 from typing import Any, Dict, List, Set
 
 import requests
@@ -16,7 +17,7 @@ from scrapers.utils import random_delay, retry_async, tag_record
 logger = logging.getLogger(__name__)
 
 SEARCH_URL = "https://apply07.grants.gov/grantsws/rest/opportunities/search/"
-DETAIL_URL = "https://www.grants.gov/search-grants/opportunity/detail?oppId={}"
+DETAIL_URL = "https://simpler.grants.gov/opportunity/{}"
 PAGE_SIZE = 25
 
 # Keywords searched sequentially; deduplication by opportunityId across all passes.
@@ -24,8 +25,18 @@ KEYWORDS = [
     "sustainable beauty",
     "clean beauty",
     "green cosmetics",
-    "sustainability personal care",
-    "environmental consumer packaged goods",
+    "non-toxic personal care",
+    "salon sustainability",
+    "environmental health beauty",
+    "clean beauty nonprofit",
+    "green salon",
+    "beauty industry sustainability",
+    "toxic chemicals consumer products",
+    "environmental justice personal care",
+    "small business sustainability grant",
+    "women owned business sustainability",
+    "community health environmental",
+    "clean product innovation",
 ]
 
 
@@ -97,8 +108,44 @@ async def _scrape_keyword(keyword: str, seen_ids: Set[str]) -> List[FundingRecor
     return records
 
 
+# Ordered list of (exact_phrase, points) pairs evaluated against the lowercased title.
+# Score starts at 0; each matching phrase adds its points. Cap at 100.
+# Longer/more-specific phrases are listed first so they can stack with shorter ones.
+_SCORE_RULES: List[tuple] = [
+    ("sustainable beauty",         30),
+    ("clean beauty",               30),
+    ("green beauty",               30),
+    ("non-toxic",                  20),
+    ("women-owned small business", 20),
+    ("personal care",              50),
+    ("hair care",                  50),
+    ("nail care",                  40),
+    ("small business",             10),
+    ("cosmetic",                   50),
+    ("beauty",                     50),
+]
+
+# Short words like "spa" need word-boundary matching to avoid false substring hits
+# (e.g. "spa" inside "aerospace", "salon" inside "salmonella").
+_WORD_BOUNDARY_RULES: List[tuple] = [
+    ("spa",   40),
+    ("salon", 50),
+]
+
+
 def _build_record(hit: Dict[str, Any], opp_id: str) -> FundingRecord:
     closing_date = hit.get("closeDate", "")
+    title = (hit.get("title", "") or "").lower()
+
+    score = sum(pts for phrase, pts in _SCORE_RULES if phrase in title)
+    score += sum(
+        pts for phrase, pts in _WORD_BOUNDARY_RULES
+        if re.search(rf"\b{re.escape(phrase)}\b", title)
+    )
+    score = min(score, 100)
+
+    base_notes = f"opportunityId:{opp_id} | closeDate:{closing_date}".strip(" |")
+    notes = f"{base_notes} | score:{score}"
 
     return FundingRecord(
         company_name=hit.get("title", ""),
@@ -108,5 +155,5 @@ def _build_record(hit: Dict[str, Any], opp_id: str) -> FundingRecord:
         report_url=DETAIL_URL.format(opp_id),
         funding_type="government",
         # opportunityId prefix is the stable upsert key used by pipeline/sheets_sync.py
-        notes=f"opportunityId:{opp_id} | closeDate:{closing_date}".strip(" |"),
+        notes=notes,
     )

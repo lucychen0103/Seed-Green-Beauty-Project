@@ -1,10 +1,12 @@
 """Sephora Accelerate Playwright scraper — ESG & Corporate Partners.
 
-Scrapes program details and application status from sephoraaccelerate.com.
+Scrapes the program page (application status) and the /alumni page (launched
+brands). Returns one record per alumni brand plus one for the program itself.
 No login required. Upsert key: report_url.
 """
 
 import logging
+import re
 from typing import List, Optional
 
 from playwright.async_api import BrowserContext, async_playwright
@@ -14,8 +16,10 @@ from scrapers.utils import random_delay, retry_async, tag_record
 
 logger = logging.getLogger(__name__)
 
-PROGRAM_URL = "https://www.sephoraaccelerate.com/"
-ROBOTS_URL = "https://www.sephoraaccelerate.com/robots.txt"
+BASE_URL = "https://www.sephoraaccelerate.com"
+PROGRAM_URL = f"{BASE_URL}/"
+ALUMNI_URL = f"{BASE_URL}/alumni"
+ROBOTS_URL = f"{BASE_URL}/robots.txt"
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -37,9 +41,12 @@ CLOSED_SIGNALS = [
     "applications for this cycle",
 ]
 
+# CSS selectors that match individual brand cards on the alumni page
+_BRAND_CARD_SELECTOR = "[class*='brand'], [class*='card'], [class*='item'], [class*='alumni']"
+
 
 async def scrape(headless: bool = True) -> List[FundingRecord]:
-    """Return Sephora Accelerate program record with current application status."""
+    """Return the program record plus one record per Sephora Accelerate alumni brand."""
     records: List[FundingRecord] = []
 
     async with async_playwright() as p:
@@ -56,9 +63,14 @@ async def scrape(headless: bool = True) -> List[FundingRecord]:
             if record:
                 records.append(record)
         except Exception as exc:
-            logger.error(
-                "sephora_accelerate: scrape failed: %s", exc, exc_info=True
-            )
+            logger.error("sephora_accelerate: program scrape failed: %s", exc, exc_info=True)
+
+        try:
+            alumni = await _scrape_alumni(context)
+            records.extend(alumni)
+            logger.info("sephora_accelerate: found %d alumni brand records", len(alumni))
+        except Exception as exc:
+            logger.error("sephora_accelerate: alumni scrape failed: %s", exc, exc_info=True)
 
         await browser.close()
 
@@ -81,16 +93,13 @@ async def _robots_allows(context: BrowserContext) -> bool:
 
 async def _scrape_program(context: BrowserContext) -> Optional[FundingRecord]:
     page = await context.new_page()
-
     await retry_async(
         lambda: page.goto(PROGRAM_URL, wait_until="networkidle", timeout=30_000)
     )
 
-    # Grab all visible text for open/closed detection and tagging
     body_el = await page.query_selector("body")
     body_text = (await body_el.inner_text()).strip() if body_el else ""
 
-    # Extract a human-readable description from the first meaningful block
     desc_el = await page.query_selector(
         "main p, .hero-description, .program-description, "
         "section p, [class*='description'], [class*='intro']"
@@ -100,7 +109,6 @@ async def _scrape_program(context: BrowserContext) -> Optional[FundingRecord]:
         description = body_text[:500].replace("\n", " ")
 
     is_open = _detect_open_status(body_text)
-
     await page.close()
 
     record = FundingRecord(
@@ -115,6 +123,52 @@ async def _scrape_program(context: BrowserContext) -> Optional[FundingRecord]:
     )
     tag_record(record, f"{record.company_name} {record.notes}")
     return record
+
+
+async def _scrape_alumni(context: BrowserContext) -> List[FundingRecord]:
+    """Return one FundingRecord per alumni brand found on the /alumni page."""
+    page = await context.new_page()
+    await retry_async(
+        lambda: page.goto(ALUMNI_URL, wait_until="networkidle", timeout=30_000)
+    )
+    # Scroll to trigger any lazy-loaded content
+    await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+    await page.wait_for_timeout(1500)
+
+    cards = await page.eval_on_selector_all(
+        _BRAND_CARD_SELECTOR,
+        "els => els.map(e => e.innerText.trim()).filter(t => t && t.length > 1 && t.length < 60)",
+    )
+    await page.close()
+
+    # Deduplicate while preserving order (page sometimes renders each name twice)
+    seen: set = set()
+    brand_names: List[str] = []
+    skip = {"a-d", "e-h", "i-m", "n-r", "s-z", "available at sephora",
+            "accelerated by sephora", "the brands"}
+    for name in cards:
+        key = name.lower().strip()
+        if key not in seen and key not in skip:
+            seen.add(key)
+            brand_names.append(name)
+
+    records: List[FundingRecord] = []
+    for name in brand_names:
+        slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+        record = FundingRecord(
+            company_name=name,
+            source="sephora_accelerate",
+            source_track="ESG & Corporate Partners",
+            sector="Beauty & Personal Care",
+            report_url=f"{ALUMNI_URL}#{slug}",
+            funding_type="corporate_sponsor",
+            beauty_alignment=True,
+            notes="Sephora Accelerate alumni — launched at Sephora",
+        )
+        tag_record(record, f"{record.company_name} {record.notes}")
+        records.append(record)
+
+    return records
 
 
 def _detect_open_status(text: str) -> Optional[bool]:

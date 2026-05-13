@@ -11,6 +11,7 @@ The site is a Next.js/React app. Confirmed data-testid attributes (2026-04):
 """
 
 import logging
+import urllib.parse
 from typing import List, Optional
 
 from playwright.async_api import BrowserContext, async_playwright
@@ -28,7 +29,21 @@ USER_AGENT = (
     "Chrome/124.0.0.0 Safari/537.36"
 )
 
-INDUSTRIES = ["Personal Care & Beauty", "Cleantech"]
+RESULTS_PER_PAGE = 25
+MAX_PAGES = 20  # safety cap: 20 × 25 = 500 per industry
+
+INDUSTRIES = [
+    "Personal Care & Beauty",
+    "Cleantech",
+    "Health & Wellness",
+    "Retail",
+    "Consumer Goods",
+    "Fashion & Apparel",
+    "Food & Beverage",
+    "Education",
+    "Environmental Services",
+    "Hospitality",
+]
 
 
 async def scrape(headless: bool = True) -> List[FundingRecord]:
@@ -80,40 +95,52 @@ async def _scrape_industry(
 ) -> List[FundingRecord]:
     records: List[FundingRecord] = []
     page = await context.new_page()
+    encoded = urllib.parse.quote(industry)
 
-    await retry_async(
-        lambda: page.goto(DIRECTORY_URL, wait_until="networkidle", timeout=60_000)
+    page_num = 0
+    while page_num <= MAX_PAGES:
+        page_param = f"&page={page_num}" if page_num > 0 else ""
+        url = (
+            f"{DIRECTORY_URL}?query={encoded}"
+            f"&sortBy=companies-production-en-us{page_param}"
+        )
+
+        await retry_async(
+            lambda u=url: page.goto(u, wait_until="networkidle", timeout=60_000)
+        )
+        await page.wait_for_timeout(3_000)
+        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        await page.wait_for_timeout(2_000)
+
+        card_els = await page.query_selector_all('[data-testid="profile-link"]')
+
+        if not card_els:
+            break
+
+        new_count = 0
+        for card in card_els:
+            record = await _parse_card(card, industry)
+            if record and record.report_url not in seen_urls:
+                seen_urls.add(record.report_url)
+                tag_record(record, f"{record.company_name} {record.sector} {record.notes}")
+                records.append(record)
+                new_count += 1
+
+        logger.info(
+            "bcorp: page %d — %d results (%d new) for %r",
+            page_num, len(card_els), new_count, industry,
+        )
+
+        # Stop when the site returns a partial page (last page) or all results already seen
+        if len(card_els) < RESULTS_PER_PAGE or new_count == 0:
+            break
+
+        page_num += 1
+
+    logger.info(
+        "bcorp: %d unique results for %r across %d page(s)",
+        len(records), industry, page_num + 1,
     )
-    await page.wait_for_timeout(3_000)
-
-    # Submit the industry name as the search query
-    try:
-        search_input = await page.query_selector('[data-testid="search-input"]')
-        if search_input:
-            await search_input.fill(industry)
-            await search_input.press("Enter")
-            await page.wait_for_load_state("networkidle")
-            await page.wait_for_timeout(3_000)
-        else:
-            logger.warning("bcorp: search-input not found for %r", industry)
-    except Exception as exc:
-        logger.warning("bcorp: search submission failed for %r: %s", industry, exc)
-
-    # Scroll to trigger lazy-loading of results
-    await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-    await page.wait_for_timeout(2_000)
-
-    # Collect all profile-link elements — one per company result
-    card_els = await page.query_selector_all('[data-testid="profile-link"]')
-    logger.info("bcorp: %d results for %r (url=%s)", len(card_els), industry, page.url)
-
-    for card in card_els:
-        record = await _parse_card(card, industry)
-        if record and record.report_url not in seen_urls:
-            seen_urls.add(record.report_url)
-            tag_record(record, f"{record.company_name} {record.sector} {record.notes}")
-            records.append(record)
-
     await page.close()
     return records
 
