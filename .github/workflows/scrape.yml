@@ -1,19 +1,20 @@
-name: ESG Scraper
+name: ESG Funding Scraper
 
 on:
   schedule:
-    # Every Monday at 06:00 UTC
-    - cron: "0 6 * * 1"
+    - cron: "0 6 * * 1"   # weekly — Monday 06:00 UTC
   workflow_dispatch:
     inputs:
       source:
-        description: "Scraper to run (all | cdp | propublica)"
+        description: "Pipeline target (all | scoring-guide | enrich-top5 | or any scraper name)"
         required: false
         default: "all"
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout repository
@@ -31,13 +32,45 @@ jobs:
       - name: Install Playwright Chromium
         run: playwright install chromium --with-deps
 
-      - name: Run scrapers
+      - name: Run pipeline
         env:
+          SOURCE: ${{ github.event.inputs.source }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
           HUNTER_API_KEY: ${{ secrets.HUNTER_API_KEY }}
-        run: python main.py ${{ github.event.inputs.source || 'all' }}
+        run: python main.py "${SOURCE:-all}"
+
+      - name: Publish data.json + dashboard to gh-pages
+        if: ${{ github.event_name != 'workflow_dispatch' || (github.event.inputs.source != 'enrich-top5' && github.event.inputs.source != 'scoring-guide') }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if git ls-remote --heads origin gh-pages | grep -q gh-pages; then
+            git fetch origin gh-pages
+            git worktree add _site origin/gh-pages
+          else
+            git worktree add _site --orphan gh-pages
+          fi
+
+          cp data.json              _site/data.json
+          cp dashboard/index.html _site/index.html
+          cp dashboard/app.js     _site/app.js
+          cp dashboard/styles.css _site/styles.css
+
+          cd _site
+          git add data.json index.html app.js styles.css
+
+          if git diff --cached --quiet; then
+            echo "data.json unchanged — skipping gh-pages commit"
+          else
+            git commit -m "chore: refresh dashboard data $(date -u '+%Y-%m-%d') [skip ci]"
+            git push origin gh-pages
+          fi
+
+          cd ..
+          git worktree remove _site
 
       - name: Post run summary
         if: always()
-        run: echo "Scraper run complete. Check logs above for per-source results."
+        run: echo "Pipeline run complete. Check logs above for per-source results."
