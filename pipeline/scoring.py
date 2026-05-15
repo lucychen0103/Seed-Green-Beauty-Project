@@ -48,6 +48,8 @@ def compute_normalized_score(record: dict) -> int:
         return _score_cdp(record)
     if source == "propublica":
         return _score_propublica(record)
+    if source == "bcorp":
+        return _score_bcorp(record)
     return 0
 
 
@@ -66,6 +68,43 @@ def _score_cdp(record: dict) -> int:
         return min(100, max(0, int(float(raw))))
     except (ValueError, TypeError):
         return 0
+
+
+_BCORP_BEAUTY_SECTORS = {
+    "personal care & beauty",
+    "health & wellness",
+    "consumer goods",
+    "retail",
+    "fashion & apparel",
+    "food & beverage",
+}
+
+_BCORP_ENV_SECTORS = {
+    "cleantech",
+    "environmental services",
+}
+
+
+def _score_bcorp(record: dict) -> int:
+    # B Corp certification itself = sustainability credential
+    score = 30
+
+    sector = record.get("sector", "").lower()
+
+    if sector in _BCORP_BEAUTY_SECTORS:
+        score += 40  # Beauty/Personal Care alignment
+    elif sector in _BCORP_ENV_SECTORS:
+        score += 20  # Strong sustainability, indirect beauty
+
+    # Community/education sectors
+    if sector in {"education", "hospitality"}:
+        score += 10
+
+    # Bonus if beauty keywords flagged
+    if record.get("beauty_alignment") in (True, "True", "1", 1):
+        score += 10
+
+    return min(100, score)
 
 
 def _score_propublica(record: dict) -> int:

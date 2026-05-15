@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 from google.oauth2.service_account import Credentials
 
 from scrapers.base import FundingRecord
+from pipeline.scoring import compute_normalized_score
 
 load_dotenv()
 
@@ -43,6 +44,7 @@ SOURCE_TAB_HEADERS = [
     "source",
     "disclosure_status",
     "score_or_rating",
+    "normalized_score",
     "sector",
     "year_of_disclosure",
     "report_url",
@@ -295,40 +297,48 @@ def _ensure_scoring_guide(spreadsheet: gspread.Spreadsheet) -> None:
         spreadsheet.del_worksheet(ws)
     except gspread.WorksheetNotFound:
         pass
-    ws = spreadsheet.add_worksheet(title=SCORING_GUIDE_TAB, rows=30, cols=4)
+    ws = spreadsheet.add_worksheet(title=SCORING_GUIDE_TAB, rows=32, cols=4)
 
     rows = [
-        ["How Grants Are Scored (0–100)", "", ""],
+        ["How Leads Are Scored (0–100)", "", ""],
         [
-            "Each grant is scored based on how relevant it is to GBC's mission"
+            "Each lead is scored based on how relevant it is to GBC's mission"
             " — sustainable, non-toxic beauty for salons and professionals.",
             "", "",
         ],
         ["", "", ""],
-        ["Score Breakdown", "", ""],
-        ["Category", "Keywords That Trigger It", "Points"],
-        ["Beauty/Personal Care", "beauty, cosmetic, salon, personal care, skin, hair", "+40"],
-        ["Sustainability", "sustainable, green, clean, non-toxic, environmental, toxic", "+30"],
-        ["Community/Nonprofit", "women, community, small business, nonprofit, education", "+20"],
-        ["Government Grant", "all grants.gov results", "+10"],
+        ["Score Breakdown by Source", "", ""],
+        ["Source", "Scoring Criteria", "Points"],
+        ["B Corp", "Certified B Corp (sustainability credential)", "+30"],
+        ["B Corp", "Personal Care & Beauty / Health & Wellness sector", "+40"],
+        ["B Corp", "Cleantech / Environmental Services sector", "+20"],
+        ["B Corp", "Beauty alignment keywords detected", "+10"],
+        ["CDP", "Performance Band A", "+100"],
+        ["CDP", "Performance Band A-", "+90"],
+        ["CDP", "Performance Band B", "+75"],
+        ["CDP", "Performance Band C", "+55"],
+        ["CDP", "Performance Band D / fallback numeric score", "+35"],
+        ["ProPublica", "Has filed 990s (active nonprofit)", "+40"],
+        ["ProPublica", "Environment sector (NTEE code C*)", "+40"],
+        ["ProPublica", "Sustainability keyword in org name", "+10 each (max +20)"],
         ["", "", ""],
         ["Score Tiers", "", ""],
         ["Score", "Tier", "What It Means"],
-        ["80–100", "High Alignment", "Strong fit — beauty AND sustainability keywords present"],
-        ["50–79", "Medium Alignment", "Partial fit — sustainability focus but not beauty-specific"],
-        ["10–49", "Low Alignment", "Weak fit — government grant with minimal keyword overlap"],
-        ["0", "Unscored", "No matching keywords found"],
+        ["80–100", "High Alignment", "Strong fit — beauty AND sustainability present"],
+        ["50–79", "Medium Alignment", "Partial fit — sustainability focus, beauty-adjacent"],
+        ["10–49", "Low Alignment", "Weak fit — minimal keyword overlap"],
+        ["0", "Unscored", "Source not yet scored or no keywords matched"],
         ["", "", ""],
         ["Sources Currently Active", "", ""],
-        ["• Grants.gov — scored by beauty alignment", "", ""],
-        ["• B Corp Directory — Personal Care & Beauty certified", "", ""],
-        ["• ProPublica — sustainability-aligned nonprofits", "", ""],
+        ["• B Corp Directory — certified companies across beauty, cleantech & wellness sectors", "", ""],
+        ["• CDP — corporate climate disclosure scores (Performance Bands A–D)", "", ""],
+        ["• ProPublica — sustainability-aligned nonprofit foundations (IRS 990 data)", "", ""],
     ]
 
-    ws.update(rows, "A1", value_input_option="USER_ENTERED")
+    ws.update(rows, "A1", value_input_option="RAW")
 
-    for r in ["A1:C1", "A2:C2", "A4:C4", "A11:C11", "A18:C18",
-              "A19:C19", "A20:C20", "A21:C21"]:
+    for r in ["A1:C1", "A2:C2", "A4:C4", "A18:C18", "A19:C19",
+              "A25:C25", "A26:C26", "A27:C27", "A28:C28"]:
         ws.merge_cells(r)
 
     _dark_green   = {"red": 0.106, "green": 0.369, "blue": 0.125}
@@ -346,18 +356,24 @@ def _ensure_scoring_guide(spreadsheet: gspread.Spreadsheet) -> None:
         "textFormat": {"italic": True, "fontSize": 10},
         "wrapStrategy": "WRAP",
     })
-    for row_num in (4, 11, 18):
+    # Section headers: Score Breakdown (row 4), Score Tiers (row 18), Sources (row 25)
+    for row_num in (4, 18, 25):
         ws.format(f"A{row_num}", {
             "backgroundColor": _medium_green,
             "textFormat": {"foregroundColor": _white, "bold": True, "fontSize": 11},
         })
-    for header_range in ("A5:C5", "A12:C12"):
+    # Column headers for each section
+    for header_range in ("A5:C5", "A19:C19"):
         ws.format(header_range, {
             "backgroundColor": _light_green,
             "textFormat": {"bold": True},
             "horizontalAlignment": "CENTER",
         })
-    for data_range in ("A6:C9", "A13:C16"):
+    # Data rows — Score Breakdown (6-17) and Score Tiers (20-23)
+    for data_range in ("A6:C17", "A20:C23"):
+        ws.format(data_range, {"backgroundColor": _pale_green})
+    # Sources rows
+    for data_range in ("A26:C28",):
         ws.format(data_range, {"backgroundColor": _pale_green})
 
     logger.info("sheets_sync: '%s' tab created/refreshed", SCORING_GUIDE_TAB)
@@ -411,11 +427,21 @@ def _to_row(record: FundingRecord) -> List[Any]:
 
 def _to_source_row(record: FundingRecord) -> List[Any]:
     """Serialise a record for a dedicated per-source tab (SOURCE_TAB_HEADERS)."""
+    score = compute_normalized_score({
+        "source": record.source,
+        "notes": record.notes,
+        "score_or_rating": record.score_or_rating,
+        "sector": record.sector.lower() if record.sector else "",
+        "disclosure_status": record.disclosure_status,
+        "company_name": record.company_name,
+        "beauty_alignment": record.beauty_alignment,
+    })
     return [
         record.company_name,
         record.source,
         record.disclosure_status,
         record.score_or_rating,
+        score,
         record.sector,
         record.year_of_disclosure if record.year_of_disclosure is not None else "",
         record.report_url or "",
