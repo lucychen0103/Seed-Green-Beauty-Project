@@ -66,6 +66,7 @@ HEADERS = [
     "source_track",
     "disclosure_status",
     "score_or_rating",
+    "normalized_score",
     "sector",
     "year_of_disclosure",
     "report_url",
@@ -330,11 +331,12 @@ def _replace_source_rows(worksheet: gspread.Worksheet, records: List[FundingReco
 # ---------------------------------------------------------------------------
 
 def _sort_native(spreadsheet: gspread.Spreadsheet, worksheet: gspread.Worksheet) -> None:
-    """Sort data rows by beauty_alignment descending using the Sheets sortRange API.
+    """Sort data rows by normalized_score descending using the Sheets sortRange API.
 
     Server-side sort — no cell values are sent to or from the client.
     """
-    ba_col = HEADERS.index("beauty_alignment")
+    score_col = HEADERS.index("normalized_score")
+    beauty_col = HEADERS.index("beauty_alignment")
     spreadsheet.batch_update({
         "requests": [{
             "sortRange": {
@@ -344,14 +346,14 @@ def _sort_native(spreadsheet: gspread.Spreadsheet, worksheet: gspread.Worksheet)
                     "startColumnIndex": 0,
                     "endColumnIndex": len(HEADERS),
                 },
-                "sortSpecs": [{
-                    "dimensionIndex": ba_col,
-                    "sortOrder": "DESCENDING",
-                }],
+                "sortSpecs": [
+                    {"dimensionIndex": score_col, "sortOrder": "DESCENDING"},
+                    {"dimensionIndex": beauty_col, "sortOrder": "DESCENDING"},
+                ],
             }
         }]
     })
-    logger.info("sheets_sync: sorted '%s' by beauty_alignment descending", worksheet.title)
+    logger.info("sheets_sync: sorted '%s' by normalized_score, beauty_alignment descending", worksheet.title)
 
 
 # ---------------------------------------------------------------------------
@@ -537,12 +539,22 @@ def _to_row(record: FundingRecord) -> List[Any]:
         if record.source == _GRANTS_GOV_SOURCE
         else ""
     )
+    score = compute_normalized_score({
+        "source": record.source,
+        "notes": record.notes,
+        "score_or_rating": record.score_or_rating,
+        "sector": record.sector.lower() if record.sector else "",
+        "disclosure_status": record.disclosure_status,
+        "company_name": record.company_name,
+        "beauty_alignment": record.beauty_alignment,
+    })
     return [
         record.company_name,
         record.source,
         record.source_track,
         record.disclosure_status,
         record.score_or_rating,
+        score,
         record.sector,
         record.year_of_disclosure if record.year_of_disclosure is not None else "",
         record.report_url or "",
