@@ -362,53 +362,83 @@ def _ensure_scoring_guide(spreadsheet: gspread.Spreadsheet) -> None:
     """Create or refresh the Scoring Guide tab with formatted content."""
     try:
         ws = spreadsheet.worksheet(SCORING_GUIDE_TAB)
-        # Delete and recreate so all existing merges/formats are fully reset.
         spreadsheet.del_worksheet(ws)
     except gspread.WorksheetNotFound:
         pass
-    ws = spreadsheet.add_worksheet(title=SCORING_GUIDE_TAB, rows=32, cols=4)
+    ws = spreadsheet.add_worksheet(title=SCORING_GUIDE_TAB, rows=42, cols=5)
+
+    E = ["", "", "", "", ""]  # blank row shorthand
 
     rows = [
-        ["How Leads Are Scored (0–100)", "", ""],
+        # Row 1 — Title
+        ["How Leads Are Scored (0–100)", "", "", "", ""],
+        # Row 2 — Description
         [
-            "Each lead is scored based on how relevant it is to GBC's mission"
+            "Each lead is scored 0–100 based on relevance to GBC's mission"
             " — sustainable, non-toxic beauty for salons and professionals.",
-            "", "",
+            "", "", "", "",
         ],
-        ["", "", ""],
-        ["Score Breakdown by Source", "", ""],
-        ["Source", "Scoring Criteria", "Points"],
-        ["B Corp", "Certified B Corp (sustainability credential)", "+30"],
-        ["B Corp", "Personal Care & Beauty / Health & Wellness sector", "+40"],
-        ["B Corp", "Cleantech / Environmental Services sector", "+20"],
-        ["B Corp", "Beauty alignment keywords detected", "+10"],
-        ["CDP", "Performance Band A", "+100"],
-        ["CDP", "Performance Band A-", "+90"],
-        ["CDP", "Performance Band B", "+75"],
-        ["CDP", "Performance Band C", "+55"],
-        ["CDP", "Performance Band D / fallback numeric score", "+35"],
-        ["ProPublica", "Has filed 990s (active nonprofit)", "+40"],
-        ["ProPublica", "Environment sector (NTEE code C*)", "+40"],
-        ["ProPublica", "Sustainability keyword in org name", "+10 each (max +20)"],
-        ["", "", ""],
-        ["Score Tiers", "", ""],
-        ["Score", "Tier", "What It Means"],
-        ["80–100", "High Alignment", "Strong fit — beauty AND sustainability present"],
-        ["50–79", "Medium Alignment", "Partial fit — sustainability focus, beauty-adjacent"],
-        ["10–49", "Low Alignment", "Weak fit — minimal keyword overlap"],
-        ["0", "Unscored", "Source not yet scored or no keywords matched"],
-        ["", "", ""],
-        ["Sources Currently Active", "", ""],
-        ["• B Corp Directory — certified companies across beauty, cleantech & wellness sectors", "", ""],
-        ["• CDP — corporate climate disclosure scores (Performance Bands A–D)", "", ""],
-        ["• ProPublica — sustainability-aligned nonprofit foundations (IRS 990 data)", "", ""],
+        E,
+        # Row 4 — B Corp section header
+        ["B Corp Scoring", "", "", "", ""],
+        # Row 5 — B Corp column headers
+        ["Criterion", "Points", "Condition", "Max Score", "Notes"],
+        # Rows 6-10 — B Corp data
+        ["Certified B Corp", "+30", "Any certified company", "30", "Sustainability baseline credential"],
+        ["Personal Care & Beauty", "+40", 'Sector = "personal care & beauty"', "70", "Primary beauty alignment"],
+        ["Health & Wellness", "+40", 'Sector = "health & wellness"', "70", "Strong beauty alignment"],
+        ["Cleantech / Env. Services", "+20", '"cleantech" or "environmental services"', "50", "Sustainability focus; beauty-adjacent"],
+        ["Beauty Keywords Detected", "+10", "beauty_alignment = True", "80", "Bonus for brand-level keyword match"],
+        E,
+        # Row 12 — CDP section header
+        ["CDP Scoring", "", "", "", ""],
+        # Row 13 — CDP column headers
+        ["Performance Band", "Score", "Disclosure Quality", "Data Years", "Notes"],
+        # Rows 14-19 — CDP data
+        ["Band A", "100", "Best-in-class", "2011–2013", "Full climate leadership; top quartile"],
+        ["Band A–", "90", "Strong", "2011–2013", "Near-exemplary; minor gaps"],
+        ["Band B", "75", "Good", "2011–2013", "Active management of emissions"],
+        ["Band C", "55", "Moderate", "2011–2013", "Awareness-level disclosure"],
+        ["Band D", "35", "Minimal", "2011–2013", "Basic disclosure only"],
+        ["No Band", "0–100", "Numeric fallback", "2011–2013", "Uses raw Disclosure Score when no band present"],
+        E,
+        # Row 21 — ProPublica section header
+        ["ProPublica Scoring", "", "", "", ""],
+        # Row 22 — ProPublica column headers
+        ["Criterion", "Points", "Condition", "Max Score", "Notes"],
+        # Rows 23-25 — ProPublica data
+        ["Filed IRS 990", "+40", "disclosure_status = True", "40", "Active filing confirms real organization"],
+        ["Environment Sector (NTEE C*)", "+40", 'NTEE code starts with "C"', "80", "Strongest sustainability signal"],
+        ["Sustainability Name Keywords", "+10 each", "Keyword found in org name", "20 max", 'e.g. "green", "eco", "sustain", "climate"'],
+        E,
+        # Row 27 — Score Tiers section header
+        ["Score Tiers", "", "", "", ""],
+        # Row 28 — Score Tiers column headers
+        ["Score Range", "Tier", "Alignment", "Recommended Action", "Description"],
+        # Rows 29-32 — Score Tiers data
+        ["80–100", "High Alignment", "Strong", "Prioritize outreach", "Beauty AND sustainability confirmed"],
+        ["50–79", "Medium Alignment", "Moderate", "Review manually", "Sustainability focus; beauty-adjacent"],
+        ["10–49", "Low Alignment", "Weak", "Monitor only", "Minimal keyword or sector overlap"],
+        ["0", "Unscored", "None", "Skip", "No scoring criteria matched"],
+        E,
+        # Row 34 — Active Sources section header
+        ["Active Data Sources", "", "", "", ""],
+        # Row 35 — Active Sources column headers
+        ["Source", "Records", "Data Type", "Update Cadence", "Notes"],
+        # Rows 36-38 — Sources data
+        ["B Corp", "235+", "Certification registry", "Annual", "Certified companies across beauty, cleantech & wellness"],
+        ["CDP", "~11 companies", "Climate disclosure scores", "Annual (2011–2013 public)", "Performance Bands A–D; full history behind paywall"],
+        ["ProPublica", "26+ nonprofits", "IRS 990 filings", "Annual", "NTEE-coded; filtered for sustainability-aligned orgs"],
     ]
 
     ws.update(rows, "A1", value_input_option="RAW")
 
-    for r in ["A1:C1", "A2:C2", "A4:C4", "A18:C18", "A19:C19",
-              "A25:C25", "A26:C26", "A27:C27", "A28:C28"]:
-        ws.merge_cells(r)
+    # Merge section title/description rows across all 5 columns
+    for merge_range in [
+        "A1:E1", "A2:E2",
+        "A4:E4", "A12:E12", "A21:E21", "A27:E27", "A34:E34",
+    ]:
+        ws.merge_cells(merge_range)
 
     _dark_green   = {"red": 0.106, "green": 0.369, "blue": 0.125}
     _medium_green = {"red": 0.180, "green": 0.490, "blue": 0.196}
@@ -416,34 +446,66 @@ def _ensure_scoring_guide(spreadsheet: gspread.Spreadsheet) -> None:
     _pale_green   = {"red": 0.914, "green": 0.961, "blue": 0.910}
     _white        = {"red": 1.0,   "green": 1.0,   "blue": 1.0}
 
-    ws.format("A1", {
+    # Main title
+    ws.format("A1:E1", {
         "backgroundColor": _dark_green,
         "textFormat": {"foregroundColor": _white, "bold": True, "fontSize": 14},
         "horizontalAlignment": "CENTER",
+        "verticalAlignment": "MIDDLE",
     })
-    ws.format("A2", {
+    # Description subtitle
+    ws.format("A2:E2", {
         "textFormat": {"italic": True, "fontSize": 10},
         "wrapStrategy": "WRAP",
     })
-    # Section headers: Score Breakdown (row 4), Score Tiers (row 18), Sources (row 25)
-    for row_num in (4, 18, 25):
-        ws.format(f"A{row_num}", {
+    # Section headers (B Corp, CDP, ProPublica, Score Tiers, Active Sources)
+    for section_row in (4, 12, 21, 27, 34):
+        ws.format(f"A{section_row}:E{section_row}", {
             "backgroundColor": _medium_green,
             "textFormat": {"foregroundColor": _white, "bold": True, "fontSize": 11},
+            "horizontalAlignment": "LEFT",
         })
-    # Column headers for each section
-    for header_range in ("A5:C5", "A19:C19"):
-        ws.format(header_range, {
+    # Column header rows for each section
+    for col_header_range in ("A5:E5", "A13:E13", "A22:E22", "A28:E28", "A35:E35"):
+        ws.format(col_header_range, {
             "backgroundColor": _light_green,
             "textFormat": {"bold": True},
             "horizontalAlignment": "CENTER",
         })
-    # Data rows — Score Breakdown (6-17) and Score Tiers (20-23)
-    for data_range in ("A6:C17", "A20:C23"):
-        ws.format(data_range, {"backgroundColor": _pale_green})
-    # Sources rows
-    for data_range in ("A26:C28",):
-        ws.format(data_range, {"backgroundColor": _pale_green})
+    # Data rows for each section
+    for data_range in ("A6:E10", "A14:E19", "A23:E25", "A29:E32", "A36:E38"):
+        ws.format(data_range, {
+            "backgroundColor": _pale_green,
+            "wrapStrategy": "WRAP",
+        })
+
+    # Column widths via Sheets batchUpdate API
+    sheet_id = ws._properties["sheetId"]
+    col_widths = [250, 100, 200, 160, 300]
+    dimension_requests = [
+        {
+            "updateDimensionProperties": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "dimension": "COLUMNS",
+                    "startIndex": col_idx,
+                    "endIndex": col_idx + 1,
+                },
+                "properties": {"pixelSize": px},
+                "fields": "pixelSize",
+            }
+        }
+        for col_idx, px in enumerate(col_widths)
+    ]
+    # Row 1 height taller for the title
+    dimension_requests.append({
+        "updateDimensionProperties": {
+            "range": {"sheetId": sheet_id, "dimension": "ROWS", "startIndex": 0, "endIndex": 1},
+            "properties": {"pixelSize": 40},
+            "fields": "pixelSize",
+        }
+    })
+    spreadsheet.batch_update({"requests": dimension_requests})
 
     logger.info("sheets_sync: '%s' tab created/refreshed", SCORING_GUIDE_TAB)
 
