@@ -2,6 +2,7 @@ from scrapers.base import FundingRecord
 from scrapers import (
     bcorp,
     california_hcd,
+    cdp,
     epa_grants,
     grants_gov,
     gri,
@@ -15,6 +16,7 @@ __all__ = [
     "FundingRecord",
     "bcorp",
     "california_hcd",
+    "cdp",
     "epa_grants",
     "grants_gov",
     "gri",

@@ -21,6 +21,7 @@ from scrapers.base import FundingRecord
 from scrapers import (
     bcorp,
     california_hcd,
+    cdp,
     epa_grants,
     grants_gov,
     gri,
@@ -45,6 +46,7 @@ SCRAPERS: Dict[str, Callable[[], Coroutine]] = {
     "grants_gov": grants_gov.scrape,
     "bcorp": bcorp.scrape,
     "propublica": propublica.scrape,
+    "cdp": cdp.scrape,
     "epa_grants": epa_grants.scrape,
     "california_hcd": california_hcd.scrape,
     "sephora_accelerate": sephora_accelerate.scrape,
