@@ -108,7 +108,7 @@ def sync(records: List[FundingRecord]) -> None:
     for source, source_records in dedicated.items():
         tab_name = DEDICATED_TABS[source]
         ws = _ensure_source_tab(spreadsheet, tab_name)
-        _replace_all_rows_source(ws, source_records)
+        _replace_all_rows_source(ws, source_records, spreadsheet)
         logger.info(
             "sheets_sync: wrote %d records to '%s'", len(source_records), tab_name
         )
@@ -179,15 +179,84 @@ def _ensure_source_tab(spreadsheet: gspread.Spreadsheet, tab_name: str) -> gspre
         return ws
 
 
-def _replace_all_rows_source(worksheet: gspread.Worksheet, records: List[FundingRecord]) -> None:
-    """Clear a dedicated source tab and rewrite with current records."""
-    worksheet.clear()
-    worksheet.append_row(SOURCE_TAB_HEADERS)
-    if records:
-        worksheet.append_rows(
-            [_to_source_row(r) for r in records],
-            value_input_option="USER_ENTERED",
+def _replace_all_rows_source(worksheet: gspread.Worksheet, records: List[FundingRecord], spreadsheet: gspread.Spreadsheet = None) -> None:
+    """Rewrite a dedicated source tab and apply visual formatting."""
+    has_table = _sheet_has_table(spreadsheet, worksheet) if spreadsheet else False
+
+    all_data = [SOURCE_TAB_HEADERS] + [_to_source_row(r) for r in records]
+
+    if has_table:
+        # Write directly into cells — preserves the table structure and column names.
+        # Clear stale rows beyond our new data range first.
+        total_rows = worksheet.row_count
+        new_last = len(all_data)
+        if total_rows > new_last:
+            worksheet.batch_clear([f"A{new_last + 1}:Z{total_rows}"])
+        worksheet.update(all_data, "A1", value_input_option="USER_ENTERED")
+    else:
+        worksheet.clear()
+        worksheet.update(all_data, "A1", value_input_option="USER_ENTERED")
+
+    if spreadsheet:
+        _apply_source_tab_formatting(spreadsheet, worksheet, has_table=has_table)
+
+
+def _sheet_has_table(spreadsheet: gspread.Spreadsheet, ws: gspread.Worksheet) -> bool:
+    """Return True if the worksheet contains at least one Google Sheets smart table."""
+    try:
+        resp = spreadsheet.client.request(
+            "GET",
+            f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet.id}",
+            params={"fields": "sheets(properties(sheetId),tables(tableId))"},
         )
+        for sheet in resp.json().get("sheets", []):
+            if sheet["properties"]["sheetId"] == ws.id:
+                return bool(sheet.get("tables"))
+    except Exception as exc:
+        logger.warning("sheets_sync: could not check tables on '%s': %s", ws.title, exc)
+    return False
+
+
+def _apply_source_tab_formatting(
+    spreadsheet: gspread.Spreadsheet, ws: gspread.Worksheet, has_table: bool = False
+) -> None:
+    """Freeze header and apply green header row. Filter/banding only on non-table tabs."""
+    sid = ws.id
+    _dark_green = {"red": 0.106, "green": 0.369, "blue": 0.125}
+    _pale_green  = {"red": 0.914, "green": 0.961, "blue": 0.910}
+    _white       = {"red": 1.0,   "green": 1.0,   "blue": 1.0}
+
+    requests = [
+        {"updateSheetProperties": {
+            "properties": {"sheetId": sid, "gridProperties": {"frozenRowCount": 1}},
+            "fields": "gridProperties.frozenRowCount",
+        }},
+        {"repeatCell": {
+            "range": {"sheetId": sid, "startRowIndex": 0, "endRowIndex": 1},
+            "cell": {"userEnteredFormat": {
+                "backgroundColor": _dark_green,
+                "textFormat": {"foregroundColor": _white, "bold": True, "fontSize": 10},
+                "horizontalAlignment": "CENTER",
+            }},
+            "fields": "userEnteredFormat(backgroundColor,textFormat,horizontalAlignment)",
+        }},
+    ]
+
+    if not has_table:
+        # Smart tables already supply filters and alternating row colors.
+        requests.append({"setBasicFilter": {
+            "filter": {"range": {"sheetId": sid, "startRowIndex": 0, "startColumnIndex": 0}},
+        }})
+        try:
+            spreadsheet.batch_update({"requests": requests + [{"addBanding": {"bandedRange": {
+                "range": {"sheetId": sid, "startRowIndex": 1, "startColumnIndex": 0},
+                "rowProperties": {"firstBandColor": _white, "secondBandColor": _pale_green},
+            }}}]})
+            return
+        except Exception:
+            pass  # Banding already exists — fall through
+
+    spreadsheet.batch_update({"requests": requests})
 
 
 # ---------------------------------------------------------------------------

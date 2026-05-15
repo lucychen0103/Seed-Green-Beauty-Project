@@ -110,12 +110,15 @@ def _score_bcorp(record: dict) -> int:
 def _score_propublica(record: dict) -> int:
     score = 0
 
-    # +40: has filed 990s (disclosure_status may be bool or string after sheet round-trip)
+    # +40: has filed 990s
     if record.get("disclosure_status") in (True, "True", "true"):
         score += 40
 
-    # +40: Environment sector (NTEE code C*)
-    if record.get("sector", "") in _ENV_SECTORS:
+    # +40: Environment sector — handles both NTEE code format ("C20 — Portland, OR")
+    # and legacy descriptive format ("Environment", "Natural Resources Conservation", etc.)
+    sector = record.get("sector", "")
+    ntee_letter = sector.split("—")[0].strip()[:1].upper() if sector else ""
+    if ntee_letter == "C" or sector in _ENV_SECTORS:
         score += 40
 
     # +10 per sustainability keyword in org name, capped at +20
