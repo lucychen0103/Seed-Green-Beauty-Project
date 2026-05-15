@@ -1,13 +1,11 @@
 """Google Sheets sync module.
 
 Routes FundingRecords to the correct tab by source:
-  - grants_gov  → "Government Grants" tab  (single-source: clear + rewrite)
-  - all others  → "Opportunities" tab      (multi-source: delete own rows + append)
-
-Source isolation guarantee: when source X syncs, ONLY rows where source == X
-are deleted/replaced. Rows from all other sources are never touched.
-
-Sorting uses the Google Sheets native sortRange API (server-side, no read/write).
+  - grants_gov  → "Government Grants" tab  (clear + rewrite)
+  - cdp         → "CDP" tab                (clear + rewrite)
+  - propublica  → "ProPublica" tab         (clear + rewrite)
+  - bcorp       → "B Corp" tab             (clear + rewrite)
+  - all others  → "Opportunities" tab      (source-isolated: delete own rows + append)
 """
 
 import json
@@ -31,8 +29,29 @@ TAB_NAME = "Opportunities"
 GOVT_GRANTS_TAB = "Government Grants"
 SCORING_GUIDE_TAB = "Scoring Guide"
 
-# Sources routed to the Government Grants tab instead of Opportunities.
-_GOVT_SOURCES = {"grants_gov"}
+# Sources that get their own dedicated tab (clear + rewrite each run).
+DEDICATED_TABS: Dict[str, str] = {
+    "grants_gov": GOVT_GRANTS_TAB,
+    "cdp":        "CDP",
+    "propublica": "ProPublica",
+    "bcorp":      "B Corp",
+}
+
+# Headers used for dedicated per-source tabs.
+SOURCE_TAB_HEADERS = [
+    "company_name",
+    "source",
+    "disclosure_status",
+    "score_or_rating",
+    "sector",
+    "year_of_disclosure",
+    "report_url",
+    "funding_type",
+    "beauty_alignment",
+    "sustainability_keywords",
+    "scraped_at",
+    "notes",
+]
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -66,29 +85,33 @@ _OPP_ID_PREFIX = "opportunityId:"
 # ---------------------------------------------------------------------------
 
 def sync(records: List[FundingRecord]) -> None:
-    """Sync records to their destination tab with strict source isolation.
+    """Sync records to their destination tab.
 
-    grants_gov  → Government Grants tab  (full clear + rewrite, single source)
-    all others  → Opportunities tab      (delete only own rows, then append)
-
-    Each source run only modifies its own rows. Other sources are never touched.
+    Sources with a dedicated tab (cdp, propublica, bcorp, grants_gov) get a
+    full clear + rewrite of their own tab each run.  Everything else goes to
+    the Opportunities tab with source-isolated row replacement.
     """
     spreadsheet, opp_ws = _get_spreadsheet_and_worksheet()
-    govt_ws = _ensure_govt_grants_tab(spreadsheet)
 
-    govt_records = [r for r in records if r.source in _GOVT_SOURCES]
-    opp_records  = [r for r in records if r.source not in _GOVT_SOURCES]
+    # Partition records by whether they have a dedicated tab.
+    dedicated: Dict[str, List[FundingRecord]] = defaultdict(list)
+    opp_records: List[FundingRecord] = []
+    for r in records:
+        if r.source in DEDICATED_TABS:
+            dedicated[r.source].append(r)
+        else:
+            opp_records.append(r)
 
-    # --- Government Grants: single-source tab, safe to clear and rewrite ---
-    if govt_records:
-        _replace_all_rows(govt_ws, govt_records)
-        _sort_native(spreadsheet, govt_ws)
+    # --- Dedicated per-source tabs: clear + rewrite ---
+    for source, source_records in dedicated.items():
+        tab_name = DEDICATED_TABS[source]
+        ws = _ensure_source_tab(spreadsheet, tab_name)
+        _replace_all_rows_source(ws, source_records)
         logger.info(
-            "sheets_sync: wrote %d records to '%s'",
-            len(govt_records), GOVT_GRANTS_TAB,
+            "sheets_sync: wrote %d records to '%s'", len(source_records), tab_name
         )
 
-    # --- Opportunities: multi-source tab, source-isolated updates only ---
+    # --- Opportunities: multi-source tab, source-isolated updates ---
     by_source: Dict[str, List[FundingRecord]] = defaultdict(list)
     for r in opp_records:
         by_source[r.source].append(r)
@@ -142,6 +165,27 @@ def _ensure_govt_grants_tab(spreadsheet: gspread.Spreadsheet) -> gspread.Workshe
         ws = spreadsheet.add_worksheet(title=GOVT_GRANTS_TAB, rows=5000, cols=len(HEADERS))
         ws.append_row(HEADERS)
         return ws
+
+
+def _ensure_source_tab(spreadsheet: gspread.Spreadsheet, tab_name: str) -> gspread.Worksheet:
+    """Return (or create) a dedicated per-source worksheet."""
+    try:
+        return spreadsheet.worksheet(tab_name)
+    except gspread.WorksheetNotFound:
+        ws = spreadsheet.add_worksheet(title=tab_name, rows=5000, cols=len(SOURCE_TAB_HEADERS))
+        ws.append_row(SOURCE_TAB_HEADERS)
+        return ws
+
+
+def _replace_all_rows_source(worksheet: gspread.Worksheet, records: List[FundingRecord]) -> None:
+    """Clear a dedicated source tab and rewrite with current records."""
+    worksheet.clear()
+    worksheet.append_row(SOURCE_TAB_HEADERS)
+    if records:
+        worksheet.append_rows(
+            [_to_source_row(r) for r in records],
+            value_input_option="USER_ENTERED",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -247,9 +291,11 @@ def _ensure_scoring_guide(spreadsheet: gspread.Spreadsheet) -> None:
     """Create or refresh the Scoring Guide tab with formatted content."""
     try:
         ws = spreadsheet.worksheet(SCORING_GUIDE_TAB)
-        ws.clear()
+        # Delete and recreate so all existing merges/formats are fully reset.
+        spreadsheet.del_worksheet(ws)
     except gspread.WorksheetNotFound:
-        ws = spreadsheet.add_worksheet(title=SCORING_GUIDE_TAB, rows=30, cols=4)
+        pass
+    ws = spreadsheet.add_worksheet(title=SCORING_GUIDE_TAB, rows=30, cols=4)
 
     rows = [
         ["How Grants Are Scored (0–100)", "", ""],
@@ -361,3 +407,59 @@ def _to_row(record: FundingRecord) -> List[Any]:
         record.scraped_at,
         record.notes,
     ]
+
+
+def _to_source_row(record: FundingRecord) -> List[Any]:
+    """Serialise a record for a dedicated per-source tab (SOURCE_TAB_HEADERS)."""
+    return [
+        record.company_name,
+        record.source,
+        record.disclosure_status,
+        record.score_or_rating,
+        record.sector,
+        record.year_of_disclosure if record.year_of_disclosure is not None else "",
+        record.report_url or "",
+        record.funding_type,
+        _extract_beauty_score(record),
+        ", ".join(record.sustainability_keywords),
+        record.scraped_at,
+        record.notes,
+    ]
+
+
+# ---------------------------------------------------------------------------
+# CLI / legacy tooling (main.py commands, backfill scripts)
+# ---------------------------------------------------------------------------
+
+def refresh_scoring_guide() -> None:
+    """Connect and (re)write the Scoring Guide tab only."""
+    spreadsheet, _ = _get_spreadsheet_and_worksheet()
+    _ensure_scoring_guide(spreadsheet)
+
+
+def get_spreadsheet() -> gspread.Spreadsheet:
+    """Return the configured spreadsheet (e.g. for top_performers enrichment)."""
+    spreadsheet, _ = _get_spreadsheet_and_worksheet()
+    return spreadsheet
+
+
+def get_client() -> gspread.Client:
+    """Build a gspread client from GOOGLE_SERVICE_ACCOUNT_JSON (legacy scripts)."""
+    raw = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]
+    info = json.loads(raw)
+    creds = Credentials.from_service_account_info(info, scopes=SCOPES)
+    return gspread.authorize(creds)
+
+
+def _open_spreadsheet(client: gspread.Client) -> gspread.Spreadsheet:
+    """Open the spreadsheet by ID (legacy scripts)."""
+    return client.open_by_key(os.environ["SPREADSHEET_ID"])
+
+
+def _get_or_create_tab(spreadsheet: gspread.Spreadsheet, tab_name: str) -> gspread.Worksheet:
+    """Return a worksheet by title, creating it if missing (legacy scripts)."""
+    try:
+        return spreadsheet.worksheet(tab_name)
+    except gspread.WorksheetNotFound:
+        logger.info("sheets_sync: creating worksheet %r", tab_name)
+        return spreadsheet.add_worksheet(title=tab_name, rows=2000, cols=20)

@@ -2,43 +2,50 @@ name: ESG Funding Scraper
 
 on:
   schedule:
-    - cron: '0 6 * * 1'   # weekly — Monday 06:00 UTC
-  workflow_dispatch:        # allow manual runs from the Actions tab
+    - cron: "0 6 * * 1"   # weekly — Monday 06:00 UTC
+  workflow_dispatch:
+    inputs:
+      source:
+        description: "Pipeline target (all | scoring-guide | enrich-top5 | or any scraper name)"
+        required: false
+        default: "all"
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
-      - name: Checkout main
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
+      - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-          cache: pip
+          python-version: "3.12"
+          cache: "pip"
 
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
-      - name: Install Playwright + Chromium system deps
-        run: |
-          playwright install chromium
-          playwright install-deps chromium
+      - name: Install Playwright Chromium
+        run: playwright install chromium --with-deps
 
       - name: Run pipeline
         env:
+          SOURCE: ${{ github.event.inputs.source }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
-        run: python main.py
+          HUNTER_API_KEY: ${{ secrets.HUNTER_API_KEY }}
+        run: python main.py "${SOURCE:-all}"
 
       - name: Publish data.json + dashboard to gh-pages
+        if: ${{ github.event_name != 'workflow_dispatch' || (github.event.inputs.source != 'enrich-top5' && github.event.inputs.source != 'scoring-guide') }}
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Fetch gh-pages if it already exists; create an orphan branch if not.
           if git ls-remote --heads origin gh-pages | grep -q gh-pages; then
             git fetch origin gh-pages
             git worktree add _site origin/gh-pages
@@ -46,8 +53,7 @@ jobs:
             git worktree add _site --orphan gh-pages
           fi
 
-          # Copy the dashboard files and fresh data.json into the worktree.
-          cp data.json          _site/data.json
+          cp data.json              _site/data.json
           cp dashboard/index.html _site/index.html
           cp dashboard/app.js     _site/app.js
           cp dashboard/styles.css _site/styles.css
@@ -64,3 +70,7 @@ jobs:
 
           cd ..
           git worktree remove _site
+
+      - name: Post run summary
+        if: always()
+        run: echo "Pipeline run complete. Check logs above for per-source results."

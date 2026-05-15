@@ -1,11 +1,13 @@
 """ESG Funding Intelligence Platform — main entry point.
 
-Runs all scrapers sequentially, syncs non-empty results to Google Sheets,
-and writes a sanitised data.json for the static dashboard.
+Runs scrapers (all or one source), syncs results to Google Sheets, and writes
+data.json for the static dashboard.
 
 Usage:
-    python main.py              # run all sources
-    python main.py grants_gov   # run one source by name
+    python main.py                    # run all scrapers
+    python main.py grants_gov         # run one source by name
+    python main.py scoring-guide      # refresh Scoring Guide tab only
+    python main.py enrich-top5        # Hunter.io enrichment for top performers
 """
 
 import asyncio
@@ -19,6 +21,7 @@ from scrapers.base import FundingRecord
 from scrapers import (
     bcorp,
     california_hcd,
+    cdp,
     epa_grants,
     grants_gov,
     gri,
@@ -27,7 +30,7 @@ from scrapers import (
     sephora_accelerate,
     unilever_foundry,
 )
-from pipeline.sheets_sync import sync
+from pipeline.sheets_sync import get_spreadsheet, refresh_scoring_guide, sync
 
 logging.basicConfig(
     level=logging.INFO,
@@ -40,15 +43,16 @@ DATA_JSON_PATH = "data.json"
 
 # Ordered by build priority; each value is a zero-argument async callable.
 SCRAPERS: Dict[str, Callable[[], Coroutine]] = {
-    "grants_gov":          grants_gov.scrape,
-    "bcorp":               bcorp.scrape,
-    "propublica":          propublica.scrape,
-    "epa_grants":          epa_grants.scrape,
-    "california_hcd":      california_hcd.scrape,
-    "sephora_accelerate":  sephora_accelerate.scrape,
-    "unilever_foundry":    unilever_foundry.scrape,
-    "loreal":              loreal.scrape,
-    "gri":                 gri.scrape,
+    "grants_gov": grants_gov.scrape,
+    "bcorp": bcorp.scrape,
+    "propublica": propublica.scrape,
+    "cdp": cdp.scrape,
+    "epa_grants": epa_grants.scrape,
+    "california_hcd": california_hcd.scrape,
+    "sephora_accelerate": sephora_accelerate.scrape,
+    "unilever_foundry": unilever_foundry.scrape,
+    "loreal": loreal.scrape,
+    "gri": gri.scrape,
 }
 
 
@@ -80,7 +84,6 @@ async def run_all(source: str = "all") -> None:
             continue
 
         if not records:
-            # The individual scraper already logged a warning; skip sync for this source.
             logger.warning("Scraper '%s' returned 0 results — skipping sync", name)
             continue
 
@@ -109,6 +112,33 @@ def _write_data_json(records: List[FundingRecord]) -> None:
         json.dump(payload, fh, ensure_ascii=False, indent=2)
 
 
+def write_scoring_guide() -> None:
+    """Connect to the spreadsheet and (re)write the Scoring Guide tab only."""
+    refresh_scoring_guide()
+    print("Scoring Guide tab updated.")
+
+
+def enrich_top_performers() -> None:
+    """Find top companies per source and look up employee emails via Hunter.io."""
+    from pipeline import top_performers
+
+    spreadsheet = get_spreadsheet()
+    top_performers.run(spreadsheet)
+    print("Top performers enrichment complete.")
+
+
 if __name__ == "__main__":
+    valid_cli = {"all", *SCRAPERS.keys(), "scoring-guide", "enrich-top5"}
     source = sys.argv[1] if len(sys.argv) > 1 else "all"
-    asyncio.run(run_all(source))
+    if source not in valid_cli:
+        print(
+            f"Unknown source '{source}'. Valid options: {', '.join(sorted(valid_cli))}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if source == "scoring-guide":
+        write_scoring_guide()
+    elif source == "enrich-top5":
+        enrich_top_performers()
+    else:
+        asyncio.run(run_all(source))
