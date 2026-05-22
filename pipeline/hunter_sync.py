@@ -451,6 +451,8 @@ def build_company_domains_tab(spreadsheet) -> None:
 
         print(f"[domains] '{ws.title}': {found_in_tab} unique companies", file=sys.stderr)
 
+    rows.sort(key=lambda r: (0 if r[3] == "known" else 1, r[1].lower()))
+
     ws_out = _get_or_create_tab(spreadsheet, DOMAINS_TAB)
     ws_out.clear()
     ws_out.update([DOMAINS_FIELDS] + rows, value_input_option="USER_ENTERED")
