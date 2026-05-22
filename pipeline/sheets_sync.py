@@ -559,6 +559,75 @@ def format_master_tab() -> None:
     _ensure_master_tab_header(spreadsheet)
 
 
+def merge_bcorp_into_master() -> None:
+    """Append B Corp companies not already present in the Master tab."""
+    spreadsheet, _ = _get_spreadsheet_and_worksheet()
+
+    # ── Read existing Master company names for dedup ──────────────────────
+    master_ws = spreadsheet.worksheet(MASTER_TAB)
+    master_rows = master_ws.get_all_values()
+    if not master_rows:
+        logger.error("Master tab is empty — aborting merge")
+        return
+
+    master_header = master_rows[0]
+    try:
+        master_name_col = master_header.index("company_name")
+    except ValueError:
+        master_name_col = 0
+
+    existing_names: set[str] = {
+        row[master_name_col].strip().lower()
+        for row in master_rows[1:]
+        if master_name_col < len(row) and row[master_name_col].strip()
+    }
+    logger.info("merge: Master tab has %d existing companies", len(existing_names))
+
+    # ── Read B Corp tab ───────────────────────────────────────────────────
+    bcorp_ws = spreadsheet.worksheet("B Corp")
+    bcorp_rows = bcorp_ws.get_all_values()
+    if len(bcorp_rows) < 2:
+        logger.warning("merge: B Corp tab has no data rows — nothing to merge")
+        return
+
+    bcorp_header = bcorp_rows[0]
+    bcorp_field_map = {f: i for i, f in enumerate(bcorp_header)}
+
+    def _bcorp_val(row: list, field: str) -> str:
+        idx = bcorp_field_map.get(field)
+        return row[idx].strip() if idx is not None and idx < len(row) else ""
+
+    # ── Build new rows mapped to MASTER_TAB_HEADERS ───────────────────────
+    new_rows: list[list[str]] = []
+    for row in bcorp_rows[1:]:
+        name = _bcorp_val(row, "company_name")
+        if not name or name.lower() in existing_names:
+            continue
+        existing_names.add(name.lower())
+        new_rows.append([
+            name,
+            _bcorp_val(row, "source"),
+            _bcorp_val(row, "disclosure_status"),
+            _bcorp_val(row, "score_or_rating"),
+            _bcorp_val(row, "sector"),
+            _bcorp_val(row, "year_of_disclosure"),
+            _bcorp_val(row, "report_url"),
+            _bcorp_val(row, "funding_type"),
+            _bcorp_val(row, "beauty_alignment"),
+            _bcorp_val(row, "sustainability_keywords"),
+            _bcorp_val(row, "scraped_at"),
+            _bcorp_val(row, "notes"),
+            "",  # officers — not present in B Corp tab
+        ])
+
+    if not new_rows:
+        logger.info("merge: all B Corp companies already present in Master — nothing added")
+        return
+
+    master_ws.append_rows(new_rows, value_input_option="USER_ENTERED")
+    logger.info("merge: appended %d B Corp companies to Master tab", len(new_rows))
+
+
 # ---------------------------------------------------------------------------
 # Record serialisation
 # ---------------------------------------------------------------------------

@@ -11,6 +11,7 @@ Usage:
     python main.py enrich-contacts    # Hunter.io enrichment for ALL contacts (CDP + B Corp + ProPublica)
     python main.py build-domains      # write Company Domains tab (no API calls)
     python main.py format-master      # add/format header row on Master tab
+    python main.py merge-bcorp        # append B Corp companies to Master tab
 """
 
 import asyncio
@@ -33,7 +34,7 @@ from scrapers import (
     sephora_accelerate,
     unilever_foundry,
 )
-from pipeline.sheets_sync import format_master_tab, get_spreadsheet, refresh_scoring_guide, sync
+from pipeline.sheets_sync import format_master_tab, get_spreadsheet, merge_bcorp_into_master, refresh_scoring_guide, sync
 
 logging.basicConfig(
     level=logging.INFO,
@@ -149,7 +150,7 @@ def build_domains() -> None:
 
 
 if __name__ == "__main__":
-    valid_cli = {"all", *SCRAPERS.keys(), "scoring-guide", "enrich-top5", "enrich-contacts", "build-domains", "format-master"}
+    valid_cli = {"all", *SCRAPERS.keys(), "scoring-guide", "enrich-top5", "enrich-contacts", "build-domains", "format-master", "merge-bcorp"}
     source = sys.argv[1] if len(sys.argv) > 1 else "all"
     if source not in valid_cli:
         print(
@@ -168,5 +169,8 @@ if __name__ == "__main__":
     elif source == "format-master":
         format_master_tab()
         print("Master tab header formatted.")
+    elif source == "merge-bcorp":
+        merge_bcorp_into_master()
+        print("B Corp companies merged into Master tab.")
     else:
         asyncio.run(run_all(source))
