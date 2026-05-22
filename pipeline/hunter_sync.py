@@ -382,53 +382,74 @@ DOMAINS_TAB = "Company Domains"
 DOMAINS_FIELDS = ["source", "company_name", "domain", "domain_source"]
 
 
+_SKIP_TABS = {
+    "Company Domains", "Contacts", "Top Performers Contacts",
+    "Scoring Guide", "Officers",
+}
+
+
 def build_company_domains_tab(spreadsheet) -> None:
     """Write a 'Company Domains' tab listing every company and its resolved domain.
 
-    Reads company names from CDP, B Corp, and ProPublica tabs, resolves each to
-    a domain via KNOWN_DOMAINS (or a slug-guess fallback), and writes the results.
-    domain_source indicates whether the match came from the known-domain map or
-    was guessed from the company name.
+    Reads company_name from every data tab (Master, Opportunities, CDP, B Corp,
+    ProPublica, Government Grants, etc.), deduplicates globally, resolves each
+    name to a domain via KNOWN_DOMAINS or a slug-guess fallback, and writes the
+    results. domain_source indicates known vs. guessed.
     """
     from pipeline.sheets_sync import _get_or_create_tab
 
+    # Discover all worksheets and read from any that have a company_name column
+    # (or whose first non-empty column looks like company names for header-less tabs).
+    all_sheets = spreadsheet.worksheets()
+
+    global_seen: set[str] = set()
     rows: list[list[str]] = []
-    for tab_name in ("CDP", "B Corp", "ProPublica"):
+
+    for ws in all_sheets:
+        if ws.title in _SKIP_TABS or ws.title == DOMAINS_TAB:
+            continue
+
         try:
-            ws = spreadsheet.worksheet(tab_name)
             tab_rows = ws.get_all_values()
         except Exception as exc:
-            print(f"[domains] Cannot open '{tab_name}': {exc}", file=sys.stderr)
+            print(f"[domains] Cannot read '{ws.title}': {exc}", file=sys.stderr)
             continue
 
-        if len(tab_rows) < 2:
+        if not tab_rows:
             continue
 
+        # Determine name column: prefer explicit 'company_name' header, else column 0
         header = tab_rows[0]
-        name_col = header.index("company_name") if "company_name" in header else 0
+        if "company_name" in header:
+            name_col = header.index("company_name")
+            data_rows = tab_rows[1:]
+        else:
+            # Header-less tab (e.g. Master) — treat col 0 as name
+            name_col = 0
+            data_rows = tab_rows
 
-        seen: set[str] = set()
-        for row in tab_rows[1:]:
+        found_in_tab = 0
+        for row in data_rows:
             name = row[name_col].strip() if name_col < len(row) else ""
-            if not name or name.lower() in seen:
+            if not name or name.lower() in global_seen:
                 continue
-            seen.add(name.lower())
+            global_seen.add(name.lower())
 
-            # Check known map first
             name_lower = name.lower()
             known_hit = next(
                 (domain for frag, domain in KNOWN_DOMAINS.items() if frag in name_lower),
                 None,
             )
             if known_hit:
-                domain = known_hit
-                domain_src = "known"
+                domain, domain_src = known_hit, "known"
             else:
                 slug = re.sub(r"[^a-z0-9]", "", _LEGAL_SUFFIX_RE.sub("", name_lower))
-                domain = f"{slug}.com" if slug else ""
-                domain_src = "guessed"
+                domain, domain_src = (f"{slug}.com" if slug else ""), "guessed"
 
-            rows.append([tab_name, name, domain, domain_src])
+            rows.append([ws.title, name, domain, domain_src])
+            found_in_tab += 1
+
+        print(f"[domains] '{ws.title}': {found_in_tab} unique companies", file=sys.stderr)
 
     ws_out = _get_or_create_tab(spreadsheet, DOMAINS_TAB)
     ws_out.clear()
