@@ -7,7 +7,10 @@ Usage:
     python main.py                    # run all scrapers
     python main.py grants_gov         # run one source by name
     python main.py scoring-guide      # refresh Scoring Guide tab only
-    python main.py enrich-top5        # Hunter.io enrichment for top performers
+    python main.py enrich-top5        # Hunter.io enrichment for top performers only
+    python main.py enrich-contacts    # Hunter.io enrichment for ALL contacts (CDP + B Corp + ProPublica)
+    python main.py build-domains      # write Company Domains tab (no API calls)
+    python main.py format-master      # add/format header row on Master tab
 """
 
 import asyncio
@@ -30,7 +33,7 @@ from scrapers import (
     sephora_accelerate,
     unilever_foundry,
 )
-from pipeline.sheets_sync import get_spreadsheet, refresh_scoring_guide, sync
+from pipeline.sheets_sync import format_master_tab, get_spreadsheet, refresh_scoring_guide, sync
 
 logging.basicConfig(
     level=logging.INFO,
@@ -127,8 +130,26 @@ def enrich_top_performers() -> None:
     print("Top performers enrichment complete.")
 
 
+def enrich_contacts() -> None:
+    """Enrich ALL contacts (CDP + B Corp + ProPublica) and write to Contacts tab."""
+    from pipeline import hunter_sync
+
+    spreadsheet = get_spreadsheet()
+    hunter_sync.enrich_all_contacts(spreadsheet)
+    print("Contacts enrichment complete.")
+
+
+def build_domains() -> None:
+    """Write Company Domains tab with resolved domain for every company."""
+    from pipeline import hunter_sync
+
+    spreadsheet = get_spreadsheet()
+    hunter_sync.build_company_domains_tab(spreadsheet)
+    print("Company Domains tab written.")
+
+
 if __name__ == "__main__":
-    valid_cli = {"all", *SCRAPERS.keys(), "scoring-guide", "enrich-top5"}
+    valid_cli = {"all", *SCRAPERS.keys(), "scoring-guide", "enrich-top5", "enrich-contacts", "build-domains", "format-master"}
     source = sys.argv[1] if len(sys.argv) > 1 else "all"
     if source not in valid_cli:
         print(
@@ -140,5 +161,12 @@ if __name__ == "__main__":
         write_scoring_guide()
     elif source == "enrich-top5":
         enrich_top_performers()
+    elif source == "enrich-contacts":
+        enrich_contacts()
+    elif source == "build-domains":
+        build_domains()
+    elif source == "format-master":
+        format_master_tab()
+        print("Master tab header formatted.")
     else:
         asyncio.run(run_all(source))

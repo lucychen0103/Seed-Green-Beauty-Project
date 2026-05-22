@@ -1,11 +1,11 @@
 """Hunter.io email enrichment module.
 
-Reads officer records, filters for sustainability-relevant titles,
-looks up emails via Hunter.io's Email Finder API, and writes results
-to a 'Contacts' tab in Google Sheets.
+Reads officer records (ProPublica) and company lists (CDP, B Corp),
+looks up emails via Hunter.io, and writes results to a 'Contacts' tab.
 
-Runs automatically as part of the sync pipeline whenever officer data
-is present. Skips gracefully if HUNTER_API_KEY is not set.
+ProPublica  → Email Finder per officer name (Officers tab)
+CDP         → Domain Search per company (known domain map)
+B Corp      → Domain Search per company (domain guessed from name)
 
 API docs: https://hunter.io/api-documentation
 """
@@ -21,6 +21,56 @@ import requests
 
 HUNTER_BASE = "https://api.hunter.io/v2"
 REQUEST_TIMEOUT = 20
+
+# Known domains for CDP/B Corp brands (fragment → domain).
+KNOWN_DOMAINS: dict[str, str] = {
+    "l'oreal":             "loreal.com",
+    "loreal":              "loreal.com",
+    "unilever":            "unilever.com",
+    "procter & gamble":    "pg.com",
+    "procter and gamble":  "pg.com",
+    "estee lauder":        "elcompanies.com",
+    "beiersdorf":          "beiersdorf.com",
+    "shiseido":            "shiseido.com",
+    "kao corporation":     "kao.com",
+    "coty":                "coty.com",
+    "avon":                "avon.com",
+    "amorepacific":        "amorepacific.com",
+    "lvmh":                "lvmh.com",
+    "interparfums":        "interparfums.com",
+    "revlon":              "revlon.com",
+    "elizabeth arden":     "elizabetharden.com",
+    "clarins":             "clarins.com",
+    "kimberly-clark":      "kimberly-clark.com",
+    "kimberly clark":      "kimberly-clark.com",
+    "colgate-palmolive":   "colgatepalmolive.com",
+    "colgate palmolive":   "colgatepalmolive.com",
+    "reckitt":             "reckitt.com",
+    "johnson & johnson":   "jnj.com",
+    "johnson and johnson": "jnj.com",
+    "henkel":              "henkel.com",
+    "patagonia":           "patagonia.com",
+    "seventh generation":  "seventhgeneration.com",
+    "method":              "methodproducts.com",
+    "eileen fisher":       "eileenfisher.com",
+    "ben & jerry":         "benjerry.com",
+    "ben and jerry":       "benjerry.com",
+    "prana":               "prana.com",
+    "preserve":            "preserveproducts.com",
+    "dr. bronner":         "drbronner.com",
+    "dr bronner":          "drbronner.com",
+    "burts bees":          "burtsbees.com",
+    "burt's bees":         "burtsbees.com",
+    "pact":                "wearpact.com",
+    "allbirds":            "allbirds.com",
+    "honest company":      "honest.com",
+    "grove collaborative": "grove.co",
+}
+
+_LEGAL_SUFFIX_RE = re.compile(
+    r"\b(inc|llc|ltd|corp|co|company|group|holdings|international|intl|plc|sa|ag|gmbh|bv|srl)\b\.?",
+    re.IGNORECASE,
+)
 
 SUSTAINABILITY_TITLE_KEYWORDS = (
     "sustainability",
@@ -45,6 +95,7 @@ SUSTAINABILITY_TITLE_KEYWORDS = (
 )
 
 CONTACTS_FIELDS = [
+    "source",
     "org_name",
     "officer_name",
     "title",
@@ -58,6 +109,119 @@ CONTACTS_FIELDS = [
 
 def _now_utc() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _domain_for(company_name: str) -> str:
+    """Return a domain for a company: known map first, then slug-guess."""
+    name_lower = company_name.lower()
+    for fragment, domain in KNOWN_DOMAINS.items():
+        if fragment in name_lower:
+            return domain
+    slug = re.sub(r"[^a-z0-9]", "", _LEGAL_SUFFIX_RE.sub("", name_lower))
+    return f"{slug}.com" if slug else ""
+
+
+def _domain_search(domain: str, api_key: str, max_results: int = 3) -> list[dict]:
+    """Hunter.io Domain Search — returns up to max_results contacts for a domain."""
+    params = {"domain": domain, "limit": min(max_results, 10), "api_key": api_key}
+    time.sleep(random.uniform(1.5, 2.5))
+    for attempt in range(2):
+        try:
+            resp = requests.get(f"{HUNTER_BASE}/domain-search", params=params,
+                                timeout=REQUEST_TIMEOUT)
+            if resp.status_code == 429:
+                print("[hunter] Rate limit — waiting 60s", file=sys.stderr)
+                time.sleep(60)
+                continue
+            if resp.status_code == 401:
+                return [{"_error": "invalid_key"}]
+            resp.raise_for_status()
+            emails = resp.json().get("data", {}).get("emails", [])[:max_results]
+            return [
+                {
+                    "officer_name": f"{e.get('first_name','')} {e.get('last_name','')}".strip(),
+                    "title":         e.get("position", ""),
+                    "email":         e.get("value", ""),
+                    "email_confidence": str(e.get("confidence", "")),
+                    "hunter_status": "found",
+                }
+                for e in emails if e.get("value")
+            ]
+        except requests.exceptions.RequestException as exc:
+            print(f"[hunter] Domain search error ({domain}): {exc}", file=sys.stderr)
+    return []
+
+
+def _enrich_domain_tab(spreadsheet, tab_name: str, api_key: str) -> list[dict]:
+    """Read every company from tab_name, run Domain Search, return contact rows."""
+    try:
+        ws = spreadsheet.worksheet(tab_name)
+    except Exception as exc:
+        print(f"[hunter] Cannot open tab '{tab_name}': {exc}", file=sys.stderr)
+        return []
+
+    rows = ws.get_all_values()
+    if len(rows) < 2:
+        print(f"[hunter] Tab '{tab_name}' has no data rows", file=sys.stderr)
+        return []
+
+    header = rows[0]
+    name_col = header.index("company_name") if "company_name" in header else 0
+
+    seen: set[str] = set()
+    companies: list[str] = []
+    for row in rows[1:]:
+        name = row[name_col].strip() if name_col < len(row) else ""
+        if name and name.lower() not in seen:
+            seen.add(name.lower())
+            companies.append(name)
+
+    print(
+        f"[hunter] {tab_name}: {len(companies)} unique companies → Domain Search "
+        f"(≈{len(companies) * 2}s + API time)",
+        file=sys.stderr,
+    )
+
+    contacts: list[dict] = []
+    for i, name in enumerate(companies, 1):
+        domain = _domain_for(name)
+        if not domain:
+            print(f"[hunter]   [{i}/{len(companies)}] '{name}': no domain — skipping", file=sys.stderr)
+            continue
+
+        print(f"[hunter]   [{i}/{len(companies)}] '{name}' → {domain}", file=sys.stderr)
+        results = _domain_search(domain, api_key, max_results=3)
+
+        if not results:
+            continue
+        if "_error" in results[0]:
+            err = results[0]["_error"]
+            print(f"[hunter]        error: {err}", file=sys.stderr)
+            if err == "invalid_key":
+                break
+            continue
+
+        for c in results:
+            contacts.append({
+                "source":           tab_name,
+                "org_name":         name,
+                "officer_name":     c.get("officer_name", ""),
+                "title":            c.get("title", ""),
+                "email":            c.get("email", ""),
+                "email_confidence": c.get("email_confidence", ""),
+                "hunter_status":    c.get("hunter_status", ""),
+                "report_url":       "",
+                "enriched_at":      _now_utc(),
+            })
+            print(
+                f"[hunter]        {c.get('officer_name','?')}  <{c.get('email','')}>  "
+                f"{c.get('title','—')}",
+                file=sys.stderr,
+            )
+
+    found = sum(1 for c in contacts if c.get("email"))
+    print(f"[hunter] {tab_name}: {found} emails across {len(companies)} companies", file=sys.stderr)
+    return contacts
 
 
 def _is_sustainability_title(title: str) -> bool:
@@ -175,45 +339,16 @@ def enrich_officers(officer_records: list[dict], api_key: str) -> list[dict]:
 
 
 def sync_contacts_tab(spreadsheet, contacts: list[dict]) -> None:
-    """
-    Overwrite the Contacts tab with enriched contacts.
-    Existing rows for unchanged officers are preserved via dedup on (org_name, officer_name).
-    """
+    """Clear and rewrite the Contacts tab with all enriched contacts."""
     from pipeline.sheets_sync import _get_or_create_tab
 
     ws = _get_or_create_tab(spreadsheet, "Contacts")
-    existing = ws.get_all_values()
-
-    # Build map of existing contacts keyed by (org_name, officer_name)
-    existing_map: dict[tuple, list] = {}
-    if existing and len(existing) > 1:
-        try:
-            h = existing[0]
-            name_i = h.index("officer_name")
-            org_i = h.index("org_name")
-            for row in existing[1:]:
-                if len(row) > max(name_i, org_i):
-                    key = (row[org_i].strip(), row[name_i].strip())
-                    existing_map[key] = row
-        except (ValueError, IndexError):
-            pass
-
-    # Merge: prefer new result if email found, else keep existing non-empty email
-    final_rows = []
-    for c in contacts:
-        key = (c["org_name"].strip(), c["officer_name"].strip())
-        existing_row = existing_map.get(key)
-        if existing_row and not c["email"]:
-            # Keep previously found email rather than overwriting with blank
-            final_rows.append(existing_row)
-        else:
-            final_rows.append([c.get(f, "") for f in CONTACTS_FIELDS])
-
+    rows = [[str(c.get(f, "")) for f in CONTACTS_FIELDS] for c in contacts]
     ws.clear()
-    ws.update([CONTACTS_FIELDS] + final_rows)
-    found = sum(1 for r in final_rows if len(r) > 3 and r[3])
+    ws.update([CONTACTS_FIELDS] + rows, value_input_option="USER_ENTERED")
+    found = sum(1 for c in contacts if c.get("email"))
     print(
-        f"[hunter] 'Contacts' tab: {len(final_rows)} contacts, {found} with email",
+        f"[hunter] 'Contacts' tab: {len(rows)} contacts, {found} with email",
         file=sys.stderr,
     )
 
@@ -237,5 +372,138 @@ def run(spreadsheet, officer_records: list[dict]) -> None:
         return
 
     contacts = enrich_officers(officer_records, api_key)
+    for c in contacts:
+        c.setdefault("source", "ProPublica")
     if contacts:
         sync_contacts_tab(spreadsheet, contacts)
+
+
+DOMAINS_TAB = "Company Domains"
+DOMAINS_FIELDS = ["source", "company_name", "domain", "domain_source"]
+
+
+def build_company_domains_tab(spreadsheet) -> None:
+    """Write a 'Company Domains' tab listing every company and its resolved domain.
+
+    Reads company names from CDP, B Corp, and ProPublica tabs, resolves each to
+    a domain via KNOWN_DOMAINS (or a slug-guess fallback), and writes the results.
+    domain_source indicates whether the match came from the known-domain map or
+    was guessed from the company name.
+    """
+    from pipeline.sheets_sync import _get_or_create_tab
+
+    rows: list[list[str]] = []
+    for tab_name in ("CDP", "B Corp", "ProPublica"):
+        try:
+            ws = spreadsheet.worksheet(tab_name)
+            tab_rows = ws.get_all_values()
+        except Exception as exc:
+            print(f"[domains] Cannot open '{tab_name}': {exc}", file=sys.stderr)
+            continue
+
+        if len(tab_rows) < 2:
+            continue
+
+        header = tab_rows[0]
+        name_col = header.index("company_name") if "company_name" in header else 0
+
+        seen: set[str] = set()
+        for row in tab_rows[1:]:
+            name = row[name_col].strip() if name_col < len(row) else ""
+            if not name or name.lower() in seen:
+                continue
+            seen.add(name.lower())
+
+            # Check known map first
+            name_lower = name.lower()
+            known_hit = next(
+                (domain for frag, domain in KNOWN_DOMAINS.items() if frag in name_lower),
+                None,
+            )
+            if known_hit:
+                domain = known_hit
+                domain_src = "known"
+            else:
+                slug = re.sub(r"[^a-z0-9]", "", _LEGAL_SUFFIX_RE.sub("", name_lower))
+                domain = f"{slug}.com" if slug else ""
+                domain_src = "guessed"
+
+            rows.append([tab_name, name, domain, domain_src])
+
+    ws_out = _get_or_create_tab(spreadsheet, DOMAINS_TAB)
+    ws_out.clear()
+    ws_out.update([DOMAINS_FIELDS] + rows, value_input_option="USER_ENTERED")
+
+    # Apply same header formatting as other tabs
+    from pipeline.sheets_sync import _apply_source_tab_formatting
+    _apply_source_tab_formatting(spreadsheet, ws_out)
+
+    known_count = sum(1 for r in rows if r[3] == "known")
+    print(
+        f"[domains] '{DOMAINS_TAB}' tab written: {len(rows)} companies "
+        f"({known_count} known domains, {len(rows) - known_count} guessed)",
+        file=sys.stderr,
+    )
+
+
+def enrich_all_contacts(spreadsheet) -> None:
+    """Enrich contacts from CDP, B Corp, and ProPublica and write to the Contacts tab.
+
+    CDP + B Corp  → Domain Search (up to 3 contacts per company)
+    ProPublica    → Email Finder via Officers tab (sustainability-title filter)
+
+    Each source is written to the sheet immediately after it completes so partial
+    results are saved even if a later source hits Hunter.io rate limits.
+    """
+    api_key = os.environ.get("HUNTER_API_KEY", "").strip()
+    if not api_key:
+        print(
+            "[hunter] HUNTER_API_KEY not set — cannot look up contacts.\n"
+            "         Add HUNTER_API_KEY=<key> to your .env file.",
+            file=sys.stderr,
+        )
+        return
+
+    all_contacts: list[dict] = []
+
+    # ── CDP ──────────────────────────────────────────────────────────────
+    print("\n[hunter] === CDP (Domain Search) ===", file=sys.stderr)
+    all_contacts.extend(_enrich_domain_tab(spreadsheet, "CDP", api_key))
+    sync_contacts_tab(spreadsheet, all_contacts)
+    print(f"[hunter] Contacts tab updated: {len(all_contacts)} rows so far", file=sys.stderr)
+
+    # ── B Corp ───────────────────────────────────────────────────────────
+    print("\n[hunter] === B Corp (Domain Search) ===", file=sys.stderr)
+    all_contacts.extend(_enrich_domain_tab(spreadsheet, "B Corp", api_key))
+    sync_contacts_tab(spreadsheet, all_contacts)
+    print(f"[hunter] Contacts tab updated: {len(all_contacts)} rows so far", file=sys.stderr)
+
+    # ── ProPublica: email finder via Officers tab ─────────────────────────
+    print("\n[hunter] === ProPublica (Email Finder via Officers tab) ===", file=sys.stderr)
+    try:
+        off_ws = spreadsheet.worksheet("Officers")
+        off_rows = off_ws.get_all_values()
+    except Exception as exc:
+        print(f"[hunter] Cannot open Officers tab: {exc}", file=sys.stderr)
+        off_rows = []
+
+    if len(off_rows) >= 2:
+        off_header = off_rows[0]
+        off_map = {f: i for i, f in enumerate(off_header)}
+        officer_records = [
+            {f: (row[i] if i < len(row) else "") for f, i in off_map.items()}
+            for row in off_rows[1:]
+        ]
+        pp_contacts = enrich_officers(officer_records, api_key)
+        for c in pp_contacts:
+            c["source"] = "ProPublica"
+        all_contacts.extend(pp_contacts)
+    else:
+        print("[hunter] Officers tab empty or not found — skipping ProPublica", file=sys.stderr)
+
+    sync_contacts_tab(spreadsheet, all_contacts)
+    found = sum(1 for c in all_contacts if c.get("email"))
+    print(
+        f"\n[hunter] Done — {found}/{len(all_contacts)} contacts with email written to 'Contacts'",
+        file=sys.stderr,
+    )

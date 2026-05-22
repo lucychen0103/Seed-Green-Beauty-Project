@@ -29,6 +29,24 @@ logger = logging.getLogger(__name__)
 TAB_NAME = "Opportunities"
 GOVT_GRANTS_TAB = "Government Grants"
 SCORING_GUIDE_TAB = "Scoring Guide"
+MASTER_TAB = "Master"
+
+# Column names for the legacy Master tab (13-column layout, no normalized_score).
+MASTER_TAB_HEADERS = [
+    "company_name",
+    "source",
+    "disclosure_status",
+    "score_or_rating",
+    "sector",
+    "year_of_disclosure",
+    "report_url",
+    "funding_type",
+    "beauty_alignment",
+    "sustainability_keywords",
+    "scraped_at",
+    "notes",
+    "officers",
+]
 
 # Sources that get their own dedicated tab (clear + rewrite each run).
 DEDICATED_TABS: Dict[str, str] = {
@@ -510,6 +528,35 @@ def _ensure_scoring_guide(spreadsheet: gspread.Spreadsheet) -> None:
     spreadsheet.batch_update({"requests": dimension_requests})
 
     logger.info("sheets_sync: '%s' tab created/refreshed", SCORING_GUIDE_TAB)
+
+
+# ---------------------------------------------------------------------------
+# Master tab header
+# ---------------------------------------------------------------------------
+
+def _ensure_master_tab_header(spreadsheet: gspread.Spreadsheet) -> None:
+    """Insert a formatted header row into the Master tab if one is not present."""
+    try:
+        ws = spreadsheet.worksheet(MASTER_TAB)
+    except gspread.WorksheetNotFound:
+        logger.warning("sheets_sync: '%s' tab not found — skipping header formatting", MASTER_TAB)
+        return
+
+    first_row = ws.row_values(1)
+    if first_row and first_row[0].strip().lower() == "company_name":
+        logger.info("sheets_sync: Master tab already has header — applying formatting only")
+    else:
+        ws.insert_row(MASTER_TAB_HEADERS, index=1, value_input_option="USER_ENTERED")
+        logger.info("sheets_sync: inserted header row into Master tab")
+
+    _apply_source_tab_formatting(spreadsheet, ws)
+    logger.info("sheets_sync: formatted Master tab header")
+
+
+def format_master_tab() -> None:
+    """Connect to the spreadsheet and add/format the Master tab header."""
+    spreadsheet, _ = _get_spreadsheet_and_worksheet()
+    _ensure_master_tab_header(spreadsheet)
 
 
 # ---------------------------------------------------------------------------

@@ -1,13 +1,14 @@
 """Top Performers email enrichment.
 
-For each source tab (CDP, ProPublica), identifies the top 5 companies by
+For each source tab (CDP, ProPublica, B Corp), identifies the top 5 companies by
 normalized_score (computed on-the-fly from the sheet data), then uses
 Hunter.io to find 1-3 employee contacts per company.
 
   CDP companies    → Hunter.io Domain Search  (one call returns multiple contacts)
   ProPublica orgs  → Hunter.io Email Finder   (officer names already in Officers tab)
+  B Corp companies → Hunter.io Domain Search  (domain guessed from company name)
 
-Results are written to a "Top Performers Contacts" tab.
+Results are written to a "Top Performers Contacts" tab and merged into "Contacts".
 """
 
 import os
